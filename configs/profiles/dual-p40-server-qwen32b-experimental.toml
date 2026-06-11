@@ -1,0 +1,224 @@
+# Experimental profile for a larger server-side model.
+# Start with dual-p40-server-qwen14b.toml first; only move here after 14B is stable.
+# This profile assumes a quantized checkpoint that Transformers can dispatch with device_map="auto".
+
+[agent]
+name = "wonderbot"
+response_style = "warm, concise, reflective, technical when useful"
+reaction_threshold = 0.18
+spontaneous_interval = 20
+max_context_memories = 6
+focus_max_items = 6
+focus_decay_seconds = 180.0
+
+[codec]
+dim = 192
+ngram = 3
+window_chars = 16
+min_segment_chars = 4
+cosine_drop = 0.14
+lowercase = false
+nfkc = true
+
+[memory]
+path = "/srv/weights/wonderbot/state/memory.json"
+max_active_items = 4000
+protect_identity = true
+importance_threshold = 0.36
+min_novelty = 0.08
+
+[journal]
+path = "/srv/weights/wonderbot/state/journal.json"
+
+[longterm]
+path = "/srv/weights/wonderbot/state/long_term_memory.json"
+
+[selfmodel]
+path = "/srv/weights/wonderbot/state/self_model.json"
+auto_capture_identity = true
+auto_capture_preferences = true
+auto_capture_constraints = true
+
+[goals]
+path = "/srv/weights/wonderbot/state/goals.json"
+auto_capture_goals = true
+auto_focus_new_goal = true
+default_priority = 0.68
+
+[plans]
+path = "/srv/weights/wonderbot/state/plans.json"
+auto_capture_plans = true
+auto_capture_steps = true
+auto_update_goal_progress = true
+default_priority = 0.66
+context_limit = 3
+
+[consolidation]
+auto_enabled = true
+auto_every_explicit_turns = 3
+summary_min_items = 4
+summary_window_items = 12
+max_summary_sentences = 3
+task_limit = 4
+belief_limit = 4
+thread_limit = 4
+
+[sleep]
+auto_enabled = true
+auto_sleep_every_explicit_turns = 8
+promotion_limit = 6
+min_promotion_strength = 0.58
+dream_limit = 3
+dream_similarity_min = 0.32
+dream_similarity_max = 0.82
+archive_decay_rate = 0.03
+archive_below_strength = 0.12
+
+[ganglion]
+height = 8
+width = 8
+channels = 8
+bleed = 0.03
+
+[resonance]
+sigma = 0.5
+tau = 14.134725
+alpha = 1.2
+prime_count = 32
+
+[backend]
+kind = "hf"
+hf_model = "Qwen/Qwen3-32B-AWQ"
+hf_device = ""
+hf_device_map = "auto"
+hf_torch_dtype = "float16"
+hf_offload_dir = "/srv/weights/wonderbot/offload"
+hf_use_chat_template = true
+hf_load_in_4bit = false
+hf_quant_type = "nf4"
+hf_compute_dtype = "float16"
+hf_double_quant = true
+hf_trust_remote_code = false
+max_new_tokens = 256
+temperature = 0.7
+delta_scale = 0.20
+creative_depth = 1
+anchor_pullback = 0.76
+novelty_threshold = 0.10
+drift_threshold = 0.58
+repetition_threshold = 0.34
+latency_budget_ms = 80
+
+[runtime]
+default_device = "cpu"
+speech_device = "cuda:0"
+caption_device = "cpu"
+tts_device = "cpu"
+hf_llm_device = ""
+hf_llm_device_map = "auto"
+hf_llm_torch_dtype = "float16"
+hf_llm_load_in_4bit = false
+hf_llm_quant_type = "nf4"
+hf_llm_compute_dtype = "float16"
+hf_llm_double_quant = true
+offload_dir = "/srv/weights/wonderbot/offload"
+
+[live]
+enabled = false
+poll_interval_ms = 350
+sensor_memory_threshold = 0.10
+sensor_reaction_threshold = 0.18
+sensor_reaction_gain = 1.15
+
+[camera]
+enabled = false
+index = 0
+width = 320
+height = 240
+motion_threshold = 0.08
+brightness_threshold = 0.05
+min_salience = 0.12
+
+[microphone]
+enabled = false
+sample_rate = 16000
+channels = 1
+window_seconds = 0.80
+rms_threshold = 0.004
+peak_threshold = 0.015
+min_salience = 0.020
+device = ""
+latency = "high"
+rolling_seconds = 6.0
+transcript_window_seconds = 3.5
+preamp_gain = 2.5
+agc_target_rms = 0.05
+agc_max_gain = 4.0
+vad_enabled = true
+vad_trigger_level = 2.5
+vad_min_voiced_seconds = 0.18
+vad_min_voiced_ratio = 0.08
+silence_endpoint_seconds = 0.65
+utterance_max_seconds = 8.0
+transcript_reply_min_words = 2
+store_sound_only_events = false
+
+[caption]
+enabled = false
+model = "Salesforce/blip-image-captioning-base"
+max_new_tokens = 24
+interval_seconds = 3.0
+salience_threshold = 0.08
+min_chars = 12
+
+[speech]
+enabled = false
+model = "distil-whisper/distil-small.en"
+language = "en"
+salience_threshold = 0.08
+min_chars = 1
+cooldown_seconds = 0.20
+
+[stability]
+sensor_response_cooldown_seconds = 2.0
+spontaneous_cooldown_seconds = 6.0
+repeated_stimulus_cooldown_seconds = 3.5
+same_source_cooldown_seconds = 1.25
+minimum_response_salience = 0.18
+
+[logging]
+enabled = true
+path = "/srv/weights/wonderbot/state/replay.jsonl"
+flush_each_write = true
+
+[execution]
+path = "/srv/weights/wonderbot/state/action_runs.json"
+default_dry_run = true
+auto_mark_step_doing = true
+auto_mark_done_on_success = false
+
+[tts]
+enabled = false
+engine = "hf"
+device = "cpu"
+fallback_engine = "pyttsx3"
+rate = 185
+volume = 0.9
+voice_contains = ""
+hf_model = "facebook/mms-tts-eng"
+hf_vocoder_model = "microsoft/speecht5_hifigan"
+hf_speaker_embeddings_source = "Matthijs/cmu-arctic-xvectors"
+hf_speaker_id = 7306
+hf_device = "cpu"
+hf_sample_rate = 16000
+openai_model = "gpt-4o-mini-tts"
+openai_voice = "sage"
+openai_response_format = "wav"
+openai_speed = 1.0
+openai_timeout_seconds = 30.0
+openai_api_key_env = "OPENAI_API_KEY"
+openai_base_url = "https://api.openai.com/v1"
+playback_backend = "auto"
+speak_user_responses = true
+speak_sensor_responses = false
+speak_spontaneous = false

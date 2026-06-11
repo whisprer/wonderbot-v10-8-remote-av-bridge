@@ -1,0 +1,53 @@
+services:
+  wonderbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: wonderbot:dual-p40
+    container_name: wonderbot-dual-p40
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      HF_HOME: ${WONDERBOT_HF_CACHE:-/srv/weights/wonderbot/hf-cache}
+      TRANSFORMERS_CACHE: ${WONDERBOT_HF_CACHE:-/srv/weights/wonderbot/hf-cache}
+      WONDERBOT_STATE_ROOT: ${WONDERBOT_STATE_ROOT:-/srv/weights/wonderbot/state}
+      WONDERBOT_OFFLOAD_ROOT: ${WONDERBOT_OFFLOAD_ROOT:-/srv/weights/wonderbot/offload}
+      WONDERBOT_WORKSPACE: ${WONDERBOT_WORKSPACE:-/srv/weights/wonderbot/workspace}
+      WONDERBOT_PROFILE: ${WONDERBOT_PROFILE:-/app/configs/profiles/dual-p40-server-qwen14b.toml}
+      WONDERBOT_EXTRA_ARGS: ${WONDERBOT_EXTRA_ARGS:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+    volumes:
+      - ${WONDERBOT_WEIGHTS_ROOT:-/srv/weights/wonderbot}:/srv/weights/wonderbot
+    stdin_open: true
+    tty: true
+    gpus: all
+
+  wonderbot-diagnostics:
+    profiles: ["diag"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: wonderbot:dual-p40
+    container_name: wonderbot-dual-p40-diag
+    env_file:
+      - .env
+    environment:
+      HF_HOME: ${WONDERBOT_HF_CACHE:-/srv/weights/wonderbot/hf-cache}
+      TRANSFORMERS_CACHE: ${WONDERBOT_HF_CACHE:-/srv/weights/wonderbot/hf-cache}
+      WONDERBOT_STATE_ROOT: ${WONDERBOT_STATE_ROOT:-/srv/weights/wonderbot/state}
+      WONDERBOT_OFFLOAD_ROOT: ${WONDERBOT_OFFLOAD_ROOT:-/srv/weights/wonderbot/offload}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+    volumes:
+      - ${WONDERBOT_WEIGHTS_ROOT:-/srv/weights/wonderbot}:/srv/weights/wonderbot
+    gpus: all
+    command:
+      - python3
+      - /app/scripts/server/verify_dual_p40.py

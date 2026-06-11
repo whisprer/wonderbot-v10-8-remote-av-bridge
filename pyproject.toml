@@ -1,0 +1,107 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wonderbot"
+version = "0.10.7.0"
+description = "Continuous agent base with event-coded memory, live multimodal sensing, replay logs, self-model, durable goals, controlled tool/action execution, and phase-10.7 server-ready runtime/device routing: per-component CPU/CUDA selection, 4-bit HF backend support, dual-P40 deployment profiles, and Ubuntu 22.04 server bootstrap assets."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "OpenAI for wofl" }]
+dependencies = [
+  "httpx>=0.27.0"
+]
+
+[project.optional-dependencies]
+bridge = [
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+  "httpx>=0.27.0",
+  "opencv-python>=4.10.0",
+  "sounddevice>=0.4.7",
+  "soundfile>=0.12.1",
+  "numpy>=1.26.0"
+]
+hf = [
+  "transformers>=4.40.0",
+  "torch>=2.2.0",
+  "torchaudio>=2.2.0"
+]
+vision = [
+  "opencv-python>=4.10.0",
+  "numpy>=1.26.0"
+]
+audio = [
+  "sounddevice>=0.4.7",
+  "soundfile>=0.12.1",
+  "numpy>=1.26.0"
+]
+multimodal = [
+  "transformers>=4.40.0",
+  "torch>=2.2.0",
+  "torchaudio>=2.2.0",
+  "pillow>=10.0.0",
+  "numpy>=1.26.0"
+]
+live = [
+  "opencv-python>=4.10.0",
+  "sounddevice>=0.4.7",
+  "soundfile>=0.12.1",
+  "numpy>=1.26.0"
+]
+live-full = [
+  "opencv-python>=4.10.0",
+  "sounddevice>=0.4.7",
+  "soundfile>=0.12.1",
+  "numpy>=1.26.0",
+  "transformers>=4.40.0",
+  "torch>=2.2.0",
+  "pillow>=10.0.0"
+]
+voice = [
+  "pyttsx3>=2.90"
+]
+openai-voice = [
+  "pyttsx3>=2.90"
+]
+hf-voice = [
+  "transformers>=4.40.0",
+  "torch>=2.2.0",
+  "torchaudio>=2.2.0",
+  "soundfile>=0.12.1",
+  "numpy>=1.26.0",
+  "datasets>=2.18.0",
+  "sentencepiece>=0.2.0"
+]
+
+server-hf = [
+  "transformers>=4.40.0",
+  "accelerate>=0.30.0",
+  "bitsandbytes>=0.48.0",
+  "torch>=2.3.0",
+  "torchaudio>=2.3.0",
+  "sentencepiece>=0.2.0",
+  "safetensors>=0.4.0"
+]
+dev = [
+  "pytest>=8.0.0"
+]
+
+[project.scripts]
+wonderbot = "wonderbot.cli:main"
+wonderbot-bridge-server = "wonderbot.bridge:_server_main"
+wonderbot-bridge-client = "wonderbot.bridge:_client_main"
+seed-legacy = "scripts.seed_from_legacy:main"
+
+[tool.setuptools]
+package-dir = {"" = "."}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["wonderbot*", "scripts*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
