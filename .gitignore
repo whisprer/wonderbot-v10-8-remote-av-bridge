@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Runtime/state/cache
+state/offload/
+state/cache/
+state/*.db
+state/*.sqlite
+state/*.sqlite3
+*.log
+
+# HuggingFace/model/cache/offload
+models/
+weights/
+offload/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.gguf
+*.onnx
+
+# Local junk
+.DS_Store
+Thumbs.db
+
+# Large/generated media
+*.wav
+*.mp3
+*.mp4
+*.jpg
+*.jpeg
+*.png
+*.webm

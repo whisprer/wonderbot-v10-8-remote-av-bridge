@@ -1,0 +1,33 @@
+WonderBot AV + STT + Qwen working checkpoint
+
+Confirmed:
+- HF Qwen backend launches.
+- Qwen visible thinking disabled.
+- Remote bridge camera/microphone available.
+- /sensors shows remote camera and remote microphone active.
+- Speech transcription active with openai/whisper-tiny.en on CPU.
+- /sense-summary produces deterministic remote sensor summary.
+- /sense-ask polls sensor hub directly, sends compact observation text to Qwen, and receives a grounded sensor answer.
+- No OOM during /sense-ask in this checkpoint.
+
+Known working launch:
+  cd /srv/wonderbot-v10_8-remote-av-bridge
+  source /home/wofl/.venvs/wb-bridge/bin/activate
+  source /srv/wonderbot-env.sh
+  python -m wonderbot.cli \
+    --config /srv/wonderbot-v10_8-remote-av-bridge/configs/profiles/dual-p40-server-qwen14b-remote-bridge-fp16-stt-tiny-cpu-sensitive.toml \
+    --backend hf \
+    --hf-device-map auto \
+    --diagnostics
+
+Known working commands:
+  /sensors
+  /sense-summary
+  /sense-ask
+
+Still disabled:
+- captioning
+- TTS
+- full --live loop
+
+Do not restore past this checkpoint unless deliberately rolling back.
