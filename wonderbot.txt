@@ -1,0 +1,64 @@
+# What WonderBot Is
+
+WonderBot is a local AI companion/agent system. It is not just “an LLM in a chat box.” A normal LLM mostly waits for typed text, generates a reply, and forgets most of the surrounding world unless you paste it in. WonderBot is built to be more like a small nervous system wrapped around an LLM.
+
+At the centre is a language model, currently Qwen, which acts as the “thinking and speaking brain.” But WonderBot also has extra parts around it: sensors, memory, speech transcription, live audio/video input, and a lightweight internal event system. Instead of only receiving typed prompts, it can receive observations from a camera and microphone, turn those observations into small text events, remember useful ones, and then ask the LLM to respond using that live context.
+
+A simple way to picture it:
+
+```text
+Camera + microphone
+        ↓
+Remote bridge
+        ↓
+WonderBot sensor hub
+        ↓
+Motion/audio/STT observations
+        ↓
+Memory + context system
+        ↓
+Qwen language model
+        ↓
+Response
+```
+
+The unusual part is the “remote bridge.” The server running WonderBot does not need a webcam or microphone plugged into it. A Windows desktop can stream camera frames and microphone audio over the local network to the Linux server. The server then treats those remote streams as if they were WonderBot’s own senses.
+
+So WonderBot can do things like:
+
+* notice that the camera sees motion;
+* detect audio changes;
+* transcribe speech using Whisper;
+* pass those observations into Qwen;
+* ask Qwen to summarize what the sensors picked up;
+* respond in normal language.
+
+That makes WonderBot different from a plain LLM because the LLM is not the whole system. The LLM is only one module inside a larger loop. WonderBot has a body-like input layer, a sensor hub, a memory layer, and a language brain.
+
+It also has more than one possible “brain.” There is a lightweight local backend called LVTC, which behaves more like an associative memory/threading system. It can produce simple responses without loading the big model. Then there is the Hugging Face backend using Qwen, which gives much richer language output but needs much more GPU memory.
+
+The project is currently working in a careful manual mode. The working loop is:
+
+```text
+/sensors
+```
+
+shows whether the remote camera, remote microphone, and voice systems are available.
+
+```text
+/sense-summary
+```
+
+polls the remote sensors and gives a deterministic summary without asking Qwen.
+
+```text
+/sense-ask
+```
+
+polls the remote sensors, gathers camera/audio/STT observations, and asks Qwen to summarize them.
+
+That manual mode is important because full automatic live mode is heavier and can overload the GPU memory. The stable version currently avoids that by polling sensors deliberately instead of constantly feeding everything into Qwen.
+
+In plain English:
+
+WonderBot is an experimental local AI agent that gives a language model live senses and memory. It can see and hear through a remote desktop bridge, turn those signals into observations, transcribe speech, and ask a local LLM to reason about what happened. It is not yet a polished assistant, but it is already more than a chatbot: it is a modular AI creature with a brain, senses, and the beginnings of situated awareness.
