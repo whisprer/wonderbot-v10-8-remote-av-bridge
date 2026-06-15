@@ -1,1 +1,0 @@
-WonderBot is a local multimodal AI agent: a Qwen-powered language brain connected to remote camera, microphone, speech transcription, sensor memory, and a small event loop, so it can respond to what is happening around it rather than only to typed prompts.
