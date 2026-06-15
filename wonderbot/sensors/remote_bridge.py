@@ -55,6 +55,9 @@ class RemoteCameraAdapter:
         sharpness_reference: float = 120.0,
         face_hint_enabled: bool = False,
         face_hint_min_interval_seconds: float = 5.0,
+        expression_hint_enabled: bool = False,
+        expression_hint_min_interval_seconds: float = 5.0,
+        expression_hint_min_face_confidence: float = 0.38,
         state_change_cooldown_seconds: float = 3.0,
     ) -> None:
         try:
@@ -91,6 +94,9 @@ class RemoteCameraAdapter:
             sharpness_reference=sharpness_reference,
             face_hint_enabled=face_hint_enabled,
             face_hint_min_interval_seconds=face_hint_min_interval_seconds,
+            expression_hint_enabled=expression_hint_enabled,
+            expression_hint_min_interval_seconds=expression_hint_min_interval_seconds,
+            expression_hint_min_face_confidence=expression_hint_min_face_confidence,
             state_change_cooldown_seconds=state_change_cooldown_seconds,
         )
         self._prev_gray = None
@@ -132,6 +138,11 @@ class RemoteCameraAdapter:
                     detail += '; OpenCV face-ish hints enabled'
                 else:
                     detail += '; OpenCV face-ish hints requested but cascade unavailable'
+            if getattr(self._vision, 'expression_hint_enabled', False):
+                if self._vision.expression_hint_available:
+                    detail += '; OpenCV Expression-Lite hints enabled'
+                else:
+                    detail += '; OpenCV Expression-Lite hints requested but smile cascade unavailable'
         if self.captioner is not None:
             detail += f'; captioning via {getattr(self.captioner, "model_name", "captioner")}'
         return SensorStatus(source=self.name, enabled=True, available=True, detail=detail)

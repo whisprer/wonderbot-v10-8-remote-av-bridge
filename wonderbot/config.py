@@ -196,6 +196,9 @@ class CameraConfig:
     vision_lite_sharpness_reference: float = 120.0
     vision_lite_face_hint_enabled: bool = False
     vision_lite_face_hint_min_interval_seconds: float = 5.0
+    vision_lite_expression_hint_enabled: bool = False
+    vision_lite_expression_hint_min_interval_seconds: float = 5.0
+    vision_lite_expression_hint_min_face_confidence: float = 0.38
     vision_lite_state_change_cooldown_seconds: float = 3.0
 
 

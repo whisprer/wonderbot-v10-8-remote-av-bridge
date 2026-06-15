@@ -156,6 +156,9 @@ vision_lite_face_hint_enabled = true
 vision_lite_face_hint_min_interval_seconds = 5.0
 vision_lite_state_change_cooldown_seconds = 3.0
 
+vision_lite_expression_hint_enabled = true
+vision_lite_expression_hint_min_interval_seconds = 5.0
+vision_lite_expression_hint_min_face_confidence = 0.38
 [microphone]
 enabled = true
 sample_rate = 48000
