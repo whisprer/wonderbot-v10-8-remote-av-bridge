@@ -29,6 +29,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hf-device", default=None, help="Override HF text backend device.")
     parser.add_argument("--hf-device-map", default=None, help="Override HF text backend device_map (e.g. auto).")
     parser.add_argument("--diagnostics", action="store_true", help="Print runtime diagnostics at startup.")
+    parser.add_argument("--live-lite", action="store_true", help="Start the safe direct sensor watch loop after startup.")
+    parser.add_argument("--live-lite-cycles", default="forever", help="Live-lite cycles: integer count or forever.")
+    parser.add_argument("--live-lite-interval", type=float, default=2.0, help="Seconds between live-lite sensor polls.")
+    parser.add_argument("--live-lite-cooldown", type=float, default=8.0, help="Minimum seconds between live-lite backend calls.")
+    parser.add_argument("--live-lite-exit", action="store_true", help="Exit after live-lite stops instead of returning to interactive CLI.")
     return parser
 
 
@@ -78,6 +83,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[{cfg.agent.name}] ready. Type text or use /help.")
     if args.diagnostics:
         print(json.dumps(bot.diagnostics(), indent=2, ensure_ascii=False))
+
+    if args.live_lite:
+        live_lite_arg = f"{args.live_lite_cycles} {args.live_lite_interval} {args.live_lite_cooldown}"
+        _handle_sense_watch(live_lite_arg, bot)
+        if args.live_lite_exit:
+            bot.close()
+            print("State saved.")
+            return 0
+        print("[live-lite] returned to interactive CLI. Type /quit to exit.")
 
     try:
         while True:
