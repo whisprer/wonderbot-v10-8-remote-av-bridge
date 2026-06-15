@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import re
-from typing import Iterable
+from typing import Any, Iterable
 
 
 @dataclass(slots=True, frozen=True)
@@ -179,6 +179,275 @@ def apply_emotion_lite_to_text_and_metadata(
     if append_to_text and estimate.should_report:
         text = f"{text} {format_affect_suffix(estimate)}"
     return text, metadata
+
+
+
+@dataclass(slots=True, frozen=True)
+class VisualAffectContext:
+    """A recent visual expression cue eligible for cautious affect fusion.
+
+    This remains explicitly inferential: OpenCV face/expression hints are weak
+    context, never emotional truth and never identity recognition.
+    """
+
+    hint: str
+    confidence: float
+    face_confidence: float
+    face_count: int
+    expression_status: str
+    expression_evidence: tuple[str, ...]
+    observed_at: float
+
+    def is_fusable(self, now: float, ttl_seconds: float) -> bool:
+        if ttl_seconds <= 0:
+            return False
+        if now - float(self.observed_at) > ttl_seconds:
+            return False
+        if self.face_count <= 0:
+            return False
+        if self.hint not in {"smile-ish", "neutral-ish", "unclear"}:
+            return False
+        return self.confidence >= 0.24 or self.hint == "unclear"
+
+
+@dataclass(slots=True, frozen=True)
+class MultimodalAffectEstimate:
+    label: str
+    confidence: float
+    sources: tuple[str, ...]
+    evidence: tuple[str, ...]
+    mixed_signals: bool = False
+    should_report: bool = False
+    visual_age_seconds: float = 0.0
+
+    def metadata(self) -> dict[str, object]:
+        return {
+            "multimodal_affect": True,
+            "multimodal_affect_is_inferred": True,
+            "multimodal_affect_label": self.label,
+            "multimodal_affect_confidence": round(float(self.confidence), 4),
+            "multimodal_affect_sources": list(self.sources),
+            "multimodal_affect_evidence": list(self.evidence),
+            "multimodal_affect_mixed_signals": bool(self.mixed_signals),
+            "multimodal_affect_should_report": bool(self.should_report),
+            "multimodal_affect_visual_age_seconds": round(float(self.visual_age_seconds), 3),
+        }
+
+
+def extract_visual_affect_context(
+    metadata: dict[str, object] | None,
+    *,
+    observed_at: float,
+) -> VisualAffectContext | None:
+    """Extract a Face/Expression-Lite visual cue from camera metadata."""
+
+    if not isinstance(metadata, dict):
+        return None
+    if not bool(metadata.get("expression_lite")):
+        return None
+    if not bool(metadata.get("expression_lite_available")):
+        return None
+    if int(_coerce_optional_float(metadata.get("face_lite_count")) or 0) <= 0:
+        return None
+
+    hint = str(metadata.get("expression_lite_hint") or "").strip().lower()
+    if hint not in {"smile-ish", "neutral-ish", "unclear"}:
+        return None
+
+    confidence = _coerce_optional_float(metadata.get("expression_lite_confidence")) or 0.0
+    face_confidence = _coerce_optional_float(metadata.get("face_lite_confidence")) or 0.0
+    if confidence < 0.24 and hint != "unclear":
+        return None
+    if face_confidence < 0.28:
+        return None
+
+    return VisualAffectContext(
+        hint=hint,
+        confidence=max(0.0, min(1.0, float(confidence))),
+        face_confidence=max(0.0, min(1.0, float(face_confidence))),
+        face_count=max(0, int(_coerce_optional_float(metadata.get("face_lite_count")) or 0)),
+        expression_status=str(metadata.get("expression_lite_status") or ""),
+        expression_evidence=tuple(_metadata_string_list(metadata.get("expression_lite_evidence"))[:6]),
+        observed_at=float(observed_at),
+    )
+
+
+def apply_multimodal_affect_to_text_and_metadata(
+    text: str,
+    metadata: dict[str, object],
+    visual_context: VisualAffectContext | None,
+    *,
+    now: float,
+    max_visual_age_seconds: float = 8.0,
+    min_confidence: float = 0.34,
+    append_to_text: bool = True,
+) -> tuple[str, dict[str, object]]:
+    """Fuse text/audio Emotion-Lite with recent visual Expression-Lite context.
+
+    Text/audio remains primary. Visual expression cues only adjust or qualify the
+    affect estimate, and disagreements become "mixed/uncertain" rather than a
+    strong claim.
+    """
+
+    if visual_context is None or not visual_context.is_fusable(now, max_visual_age_seconds):
+        return text, metadata
+    if not isinstance(metadata, dict):
+        return text, metadata
+    if not bool(metadata.get("emotion_lite")):
+        return text, metadata
+
+    base_label = str(metadata.get("affect_label") or "neutral").strip().lower()
+    base_confidence = _coerce_optional_float(metadata.get("affect_confidence")) or 0.0
+    base_evidence = _metadata_string_list(metadata.get("affect_evidence"))
+    visual_age = max(0.0, float(now) - float(visual_context.observed_at))
+
+    estimate = fuse_affect_estimates(
+        base_label=base_label,
+        base_confidence=base_confidence,
+        base_should_report=bool(metadata.get("affect_should_report")),
+        base_evidence=base_evidence,
+        visual_context=visual_context,
+        visual_age_seconds=visual_age,
+        min_confidence=min_confidence,
+    )
+
+    metadata.update(estimate.metadata())
+    metadata.update(
+        {
+            "multimodal_affect_base_label": base_label,
+            "multimodal_affect_base_confidence": round(float(base_confidence), 4),
+            "multimodal_affect_visual_hint": visual_context.hint,
+            "multimodal_affect_visual_confidence": round(float(visual_context.confidence), 4),
+            "multimodal_affect_face_confidence": round(float(visual_context.face_confidence), 4),
+            "multimodal_affect_face_count": int(visual_context.face_count),
+        }
+    )
+
+    if append_to_text and estimate.should_report:
+        text = _strip_prior_affect_suffix(text)
+        text = f"{text} {format_multimodal_affect_suffix(estimate)}"
+
+    return text, metadata
+
+
+def fuse_affect_estimates(
+    *,
+    base_label: str,
+    base_confidence: float,
+    base_should_report: bool,
+    base_evidence: list[str],
+    visual_context: VisualAffectContext,
+    visual_age_seconds: float,
+    min_confidence: float = 0.34,
+) -> MultimodalAffectEstimate:
+    base_label = (base_label or "neutral").strip().lower()
+    base_confidence = max(0.0, min(1.0, float(base_confidence or 0.0)))
+    visual_confidence = max(0.0, min(1.0, float(visual_context.confidence)))
+    face_confidence = max(0.0, min(1.0, float(visual_context.face_confidence)))
+
+    sources = ("text/audio emotion-lite", "visual expression-lite", "face-lite gate")
+    evidence = list(base_evidence[:4])
+    evidence.append(f"visual expression cue: {visual_context.hint}")
+    evidence.append(f"face-lite confidence: {face_confidence:.2f}")
+    for item in visual_context.expression_evidence:
+        if item and item not in evidence:
+            evidence.append(f"visual evidence: {item}")
+
+    positive = {"engaged", "amused"}
+    negative = {"frustrated", "distressed-lite", "tired"}
+    mixed = False
+
+    hint = visual_context.hint
+
+    if hint == "smile-ish":
+        if base_label in positive:
+            label = "engaged/amused" if base_label == "engaged" else "amused"
+            confidence = base_confidence + visual_confidence * 0.18 + face_confidence * 0.05
+        elif base_label in negative:
+            label = "uncertain"
+            mixed = True
+            confidence = max(0.34, min(0.72, max(base_confidence, visual_confidence) - 0.03 + face_confidence * 0.04))
+            evidence.append("mixed cues: smile-ish visual cue conflicts with negative text/audio estimate")
+        elif base_label == "uncertain":
+            label = "uncertain/engaged"
+            confidence = max(base_confidence, 0.28 + visual_confidence * 0.30 + face_confidence * 0.08)
+            evidence.append("smile-ish visual cue softens uncertainty")
+        else:
+            label = "engaged/amused"
+            confidence = 0.18 + visual_confidence * 0.42 + face_confidence * 0.10
+
+    elif hint == "neutral-ish":
+        if base_label in positive and base_confidence >= 0.50:
+            label = "uncertain"
+            mixed = True
+            confidence = max(0.34, min(0.62, base_confidence - 0.06 + visual_confidence * 0.10))
+            evidence.append("mixed cues: neutral-ish visual cue conflicts with positive text/audio estimate")
+        elif base_label in ({"uncertain"} | negative):
+            label = base_label
+            confidence = min(0.88, base_confidence + visual_confidence * 0.05)
+            evidence.append("neutral-ish visual cue does not override text/audio estimate")
+        else:
+            label = "neutral"
+            confidence = max(base_confidence, visual_confidence * 0.35)
+
+    else:  # unclear
+        if base_label in negative or base_label == "uncertain":
+            label = base_label
+            confidence = max(base_confidence, 0.34 + visual_confidence * 0.08)
+            evidence.append("visual expression unclear; preserving text/audio estimate")
+        elif base_should_report and base_label in positive:
+            label = base_label
+            confidence = max(0.34, base_confidence - 0.04)
+            evidence.append("visual expression unclear; slightly damped text/audio estimate")
+        else:
+            label = "uncertain"
+            confidence = max(0.34, min(0.56, base_confidence * 0.55 + visual_confidence * 0.35))
+            evidence.append("visual expression unclear")
+
+    confidence = max(0.0, min(0.92, float(confidence)))
+    if label == "neutral":
+        should_report = False
+    else:
+        should_report = bool(confidence >= min_confidence or mixed)
+
+    return MultimodalAffectEstimate(
+        label=label,
+        confidence=round(confidence, 4),
+        sources=sources,
+        evidence=tuple(evidence[:8]),
+        mixed_signals=mixed,
+        should_report=should_report,
+        visual_age_seconds=visual_age_seconds,
+    )
+
+
+def format_multimodal_affect_suffix(estimate: MultimodalAffectEstimate) -> str:
+    label = estimate.label.replace("-", " ")
+    source_phrase = "text/audio + expression-lite cue"
+    if estimate.mixed_signals:
+        return (
+            f"Multimodal affect estimate: mixed cues, possibly {label} "
+            f"(confidence={estimate.confidence:.2f}; {source_phrase})."
+        )
+    return (
+        f"Multimodal affect estimate: possibly {label} "
+        f"(confidence={estimate.confidence:.2f}; {source_phrase})."
+    )
+
+
+def _strip_prior_affect_suffix(text: str) -> str:
+    cleaned = re.sub(r"\s+Affect estimate: possibly .*?\(confidence=[0-9.]+\)\.", "", str(text)).strip()
+    return cleaned or str(text)
+
+
+def _metadata_string_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if str(item).strip()]
+    return [str(value)]
 
 
 def _normalize(text: str) -> str:

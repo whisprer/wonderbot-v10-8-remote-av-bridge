@@ -13,6 +13,10 @@ from pathlib import Path
 from .agent import AgentTurn, WonderBot
 from .config import WonderBotConfig
 from .execution import parse_kv_args
+from .sensors.emotion_lite import (
+    apply_multimodal_affect_to_text_and_metadata,
+    extract_visual_affect_context,
+)
 
 
 class _DropKnownWhisperNoise(logging.Filter):
@@ -69,6 +73,38 @@ def _suppress_known_whisper_noise() -> None:
         pass
 
 
+
+_MULTIMODAL_AFFECT_ENABLED = True
+_MULTIMODAL_AFFECT_VISUAL_TTL_SECONDS = 8.0
+_MULTIMODAL_AFFECT_MIN_CONFIDENCE = 0.34
+_MULTIMODAL_AFFECT_APPEND_TO_TEXT = True
+
+
+def _configure_multimodal_affect_runtime(config: object | None) -> None:
+    """Load multimodal affect fusion runtime knobs from config if present."""
+
+    global _MULTIMODAL_AFFECT_ENABLED
+    global _MULTIMODAL_AFFECT_VISUAL_TTL_SECONDS
+    global _MULTIMODAL_AFFECT_MIN_CONFIDENCE
+    global _MULTIMODAL_AFFECT_APPEND_TO_TEXT
+
+    if config is None:
+        return
+
+    _MULTIMODAL_AFFECT_ENABLED = bool(getattr(config, "enabled", _MULTIMODAL_AFFECT_ENABLED))
+    _MULTIMODAL_AFFECT_VISUAL_TTL_SECONDS = max(
+        0.5,
+        float(getattr(config, "visual_context_ttl_seconds", _MULTIMODAL_AFFECT_VISUAL_TTL_SECONDS)),
+    )
+    _MULTIMODAL_AFFECT_MIN_CONFIDENCE = max(
+        0.0,
+        min(1.0, float(getattr(config, "min_confidence", _MULTIMODAL_AFFECT_MIN_CONFIDENCE))),
+    )
+    _MULTIMODAL_AFFECT_APPEND_TO_TEXT = bool(
+        getattr(config, "append_to_text", _MULTIMODAL_AFFECT_APPEND_TO_TEXT)
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run WonderBot interactive CLI.")
     parser.add_argument("--config", default="configs/default.toml", help="Path to TOML config.")
@@ -101,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _suppress_known_whisper_noise()
     cfg = WonderBotConfig.load(args.config)
+    _configure_multimodal_affect_runtime(getattr(cfg, "multimodal_affect", None))
     if args.backend is not None:
         cfg.backend.kind = args.backend
     if args.hf_model is not None:
@@ -212,6 +249,11 @@ def _handle_command(line: str, bot: WonderBot) -> bool:
         if not observations:
             print("[system] no live sensor event crossed the salience threshold.")
             return True
+        observations, _ = _apply_multimodal_affect_to_observations(
+            observations,
+            now=time.time(),
+            previous_visual_context=None,
+        )
 
         camera_lines = []
         microphone_lines = []
@@ -250,6 +292,11 @@ def _handle_command(line: str, bot: WonderBot) -> bool:
         if not observations:
             print("[system] no live sensor event crossed the salience threshold.")
             return True
+        observations, _ = _apply_multimodal_affect_to_observations(
+            observations,
+            now=time.time(),
+            previous_visual_context=None,
+        )
 
         observation_lines = []
 
@@ -546,9 +593,34 @@ def _format_journal_event(event: dict) -> str:
         metadata = event.get("metadata", {}) or {}
         if not isinstance(metadata, dict):
             metadata = {}
+        multimodal_label = metadata.get("multimodal_affect_label")
+        multimodal_confidence = metadata.get("multimodal_affect_confidence")
+        multimodal_hint = str(metadata.get("multimodal_affect_visual_hint") or "").strip()
+        multimodal_changed = False
+        if multimodal_label and metadata.get("multimodal_affect_should_report") and "Multimodal affect estimate:" not in str(text):
+            source_phrase = "text/audio + expression-lite cue" if multimodal_hint else "text/audio + visual context"
+            label_text = str(multimodal_label).replace('-', ' ')
+            if bool(metadata.get("multimodal_affect_mixed_signals")):
+                text = (
+                    f"{text} Multimodal affect estimate: mixed cues, possibly {label_text} "
+                    f"(confidence={float(multimodal_confidence or 0.0):.2f}; {source_phrase})."
+                )
+            else:
+                text = (
+                    f"{text} Multimodal affect estimate: possibly {label_text} "
+                    f"(confidence={float(multimodal_confidence or 0.0):.2f}; {source_phrase})."
+                )
+            multimodal_changed = True
         affect_label = metadata.get("affect_label")
         affect_confidence = metadata.get("affect_confidence")
-        if affect_label and metadata.get("affect_should_report") and "Affect estimate:" not in str(text):
+        if (
+            not multimodal_changed
+            and not metadata.get("multimodal_affect_should_report")
+            and affect_label
+            and metadata.get("affect_should_report")
+            and "Affect estimate:" not in str(text)
+            and "Multimodal affect estimate:" not in str(text)
+        ):
             text = f"{text} Affect estimate: possibly {str(affect_label).replace('-', ' ')} (confidence={float(affect_confidence or 0.0):.2f})."
         backend_worthy = event.get("backend_worthy", False)
         reason = event.get("reject_reason")
@@ -625,6 +697,72 @@ def _handle_sense_journal_clear(arg: str) -> bool:
     return True
 
 
+
+def _apply_multimodal_affect_to_observations(
+    observations: list,
+    *,
+    now: float,
+    previous_visual_context,
+) -> tuple[list, object | None]:
+    """Fuse recent visual Expression-Lite cues into microphone Emotion-Lite observations.
+
+    This function intentionally runs in the live-lite orchestration layer because
+    camera and microphone observations are separate adapter outputs.
+    """
+
+    if not _MULTIMODAL_AFFECT_ENABLED or not observations:
+        return observations, previous_visual_context
+
+    current_visual_context = None
+    for obs in observations:
+        _source, _body, _salience, metadata = _sensor_observation_parts(obs)
+        candidate = extract_visual_affect_context(metadata, observed_at=now)
+        if candidate is not None:
+            current_visual_context = candidate
+
+    latest_visual_context = current_visual_context or previous_visual_context
+    if (
+        latest_visual_context is not None
+        and hasattr(latest_visual_context, "is_fusable")
+        and not latest_visual_context.is_fusable(now, _MULTIMODAL_AFFECT_VISUAL_TTL_SECONDS * 1.5)
+    ):
+        latest_visual_context = None
+
+    visual_context_for_fusion = current_visual_context or latest_visual_context
+    if (
+        visual_context_for_fusion is not None
+        and hasattr(visual_context_for_fusion, "is_fusable")
+        and not visual_context_for_fusion.is_fusable(now, _MULTIMODAL_AFFECT_VISUAL_TTL_SECONDS)
+    ):
+        visual_context_for_fusion = None
+
+    if visual_context_for_fusion is None:
+        return observations, latest_visual_context
+
+    for obs in observations:
+        source, body, salience, metadata = _sensor_observation_parts(obs)
+        if "microphone" not in source.lower():
+            continue
+        if not bool(metadata.get("emotion_lite")):
+            continue
+        updated_body, updated_metadata = apply_multimodal_affect_to_text_and_metadata(
+            body,
+            metadata,
+            visual_context_for_fusion,
+            now=now,
+            max_visual_age_seconds=_MULTIMODAL_AFFECT_VISUAL_TTL_SECONDS,
+            min_confidence=_MULTIMODAL_AFFECT_MIN_CONFIDENCE,
+            append_to_text=_MULTIMODAL_AFFECT_APPEND_TO_TEXT,
+        )
+        try:
+            obs.text = updated_body
+            obs.metadata = updated_metadata
+        except Exception:
+            pass
+
+    return observations, latest_visual_context
+
+
 def _sensor_observation_parts(obs) -> tuple[str, str, float, dict[str, object]]:
     source = getattr(obs, "source", "sensor")
     body = getattr(obs, "text", None) or str(obs)
@@ -644,6 +782,7 @@ def _sensor_prompt_from_lines(observation_lines: list[str]) -> str:
         "If audio says transcriber disabled or sound-only, say audio was detected but not transcribed. "
         "For camera Vision-Lite observations, describe only motion, lighting, sharpness, texture, and scene-change signals. "
         "If an observation includes an Affect estimate, treat it as tentative inferred metadata rather than fact. "
+        "If an observation includes a Multimodal affect estimate, treat it as cautious fused metadata, not emotional truth. "
         "Do not identify objects, people, mood, location, or activity unless the observation explicitly says so.\n\n"
         + "\n".join(observation_lines)
     )
@@ -834,12 +973,18 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
     last_backend_at = 0.0
     last_signature = ""
     recent_transcripts: list[tuple[str, float]] = []
+    latest_visual_affect_context = None
 
     try:
         while cycles is None or polls < cycles:
             polls += 1
             observations = bot.sensor_hub.poll()
             now = time.time()
+            observations, latest_visual_affect_context = _apply_multimodal_affect_to_observations(
+                observations,
+                now=now,
+                previous_visual_context=latest_visual_affect_context,
+            )
 
             if not observations:
                 print(f"[sense-watch] poll {polls}: no salient sensor event.")

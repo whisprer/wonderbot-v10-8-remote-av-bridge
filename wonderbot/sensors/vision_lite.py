@@ -1088,9 +1088,9 @@ def expression_lite_phrase(metrics: VisionLiteMetrics) -> str:
     confidence = metrics.expression_confidence
     if metrics.expression_smileish:
         return f"Expression-Lite: possible smile-ish expression cue (confidence={confidence:.2f})"
-    if metrics.expression_neutralish and metrics.expression_changed:
+    if metrics.expression_neutralish and (metrics.expression_changed or confidence >= 0.38):
         return f"Expression-Lite: possible neutral-ish expression cue (confidence={confidence:.2f})"
-    if metrics.expression_unclear and metrics.expression_changed:
+    if metrics.expression_unclear and (metrics.expression_changed or confidence >= 0.34):
         return f"Expression-Lite: expression cue unclear (confidence={confidence:.2f})"
     return ""
 
