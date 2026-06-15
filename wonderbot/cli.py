@@ -113,7 +113,7 @@ def _handle_command(line: str, bot: WonderBot) -> bool:
     arg = rest[0] if rest else ""
     if command == "/help":
         print(
-            "/tick [n]  /sense  /watch [n]  /sensors  /diagnostics  /focus  /voice on|off  "
+            "/tick [n]  /sense  /sense-summary  /sense-ask  /sense-watch [cycles] [interval] [cooldown]  /watch [n]  /sensors  /diagnostics  /focus  /voice on|off  "
             "/state  /memory [n]  /stm [n]  /ltm [kind] [n]  /self [kind] [n]  /preferences  /goals [status] [n]  /goal ...  "
             "/plans [status] [n]  /plan ...  /next [n]  /queue [n]  /tools  /runs [n]  /act ...  "
             "/search <query>  /remember <query>  /consolidate  /reflect  /sleep  /dream [n]  /journal [kind] [n]  /tasks  /beliefs  /threads  /save  /quit"
@@ -203,6 +203,9 @@ def _handle_command(line: str, bot: WonderBot) -> bool:
         answer = getattr(result, "text", None) or getattr(result, "content", None) or str(result)
         print(f"[hf-sensor] {answer.strip()}")
         return True
+
+    if command == "/sense-watch":
+        return _handle_sense_watch(arg, bot)
 
     if command == "/sensors":
         for status in bot.sensor_hub.status():
@@ -397,6 +400,162 @@ def _handle_command(line: str, bot: WonderBot) -> bool:
     if command == "/quit":
         return False
     print(f"Unknown command: {command}. Use /help.")
+    return True
+
+
+def _sensor_observation_parts(obs) -> tuple[str, str, float]:
+    source = getattr(obs, "source", "sensor")
+    body = getattr(obs, "text", None) or str(obs)
+    salience = float(getattr(obs, "salience", 0.0) or 0.0)
+    return str(source), str(body), salience
+
+
+def _sensor_prompt_from_lines(observation_lines: list[str]) -> str:
+    return (
+        "Summarize these live remote sensor observations in one short sentence. "
+        "Use only the observations below. "
+        "Do not invent temperature, weather, location, object identity, or environmental readings. "
+        "If audio contains a transcript, mention the transcript briefly. "
+        "If audio says transcriber disabled or sound-only, say audio was detected but not transcribed.\n\n"
+        + "\n".join(observation_lines)
+    )
+
+
+def _sensor_observation_is_backend_worthy(source: str, body: str, salience: float) -> bool:
+    """Decide whether a sensor observation deserves a Qwen backend call.
+
+    The watch loop should print all salient sensor diagnostics, but only spend
+    backend tokens on observations likely to be meaningful. In particular,
+    low-salience camera motion and VAD-rejected sound-only microphone events are
+    useful diagnostics but noisy backend prompts.
+    """
+    source_lower = source.lower()
+    body_lower = body.lower()
+
+    if "transcript accepted" in body_lower or "microphone catches speech:" in body_lower:
+        return True
+
+    if (
+        "stt: sound only" in body_lower
+        or "vad rejected" in body_lower
+        or "transcriber disabled" in body_lower
+    ):
+        return False
+
+    if "camera" in source_lower or body_lower.startswith("camera "):
+        return salience >= 0.30
+
+    return salience >= 0.75
+
+
+def _parse_sense_watch_args(arg: str) -> tuple[int | None, float, float] | None:
+    parts = arg.split()
+    cycles: int | None = 20
+    interval = 2.0
+    cooldown = 8.0
+
+    if not parts:
+        return cycles, interval, cooldown
+
+    if parts[0].lower() in {"help", "-h", "--help"}:
+        return None
+
+    if parts[0].lower() in {"forever", "infinite", "inf", "loop", "0"}:
+        cycles = None
+    else:
+        cycles = max(1, int(parts[0]))
+
+    if len(parts) >= 2:
+        interval = max(0.5, float(parts[1]))
+
+    if len(parts) >= 3:
+        cooldown = max(0.0, float(parts[2]))
+
+    if len(parts) > 3:
+        raise ValueError("too many arguments")
+
+    return cycles, interval, cooldown
+
+
+def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
+    try:
+        parsed = _parse_sense_watch_args(arg)
+    except ValueError:
+        print("Usage: /sense-watch [cycles|forever] [interval_seconds] [cooldown_seconds]")
+        return True
+
+    if parsed is None:
+        print("Usage: /sense-watch [cycles|forever] [interval_seconds] [cooldown_seconds]")
+        print("Example: /sense-watch 30 2 8")
+        print("Example: /sense-watch forever 2 8")
+        return True
+
+    cycles, interval, cooldown = parsed
+    cycle_label = "forever" if cycles is None else str(cycles)
+    print(
+        f"[sense-watch] starting: cycles={cycle_label}, "
+        f"interval={interval:.1f}s, backend_cooldown={cooldown:.1f}s"
+    )
+    print("[sense-watch] Ctrl+C stops watch mode and returns to the CLI.")
+
+    polls = 0
+    backend_calls = 0
+    last_backend_at = 0.0
+    last_signature = ""
+
+    try:
+        while cycles is None or polls < cycles:
+            polls += 1
+            observations = bot.sensor_hub.poll()
+            now = time.time()
+
+            if not observations:
+                print(f"[sense-watch] poll {polls}: no salient sensor event.")
+            else:
+                observation_lines = []
+                backend_lines = []
+
+                for obs in observations:
+                    source, body, salience = _sensor_observation_parts(obs)
+                    print(f"[{source}] {body} (salience={salience:.2f})")
+                    line = f"- [{source}] {body}"
+                    observation_lines.append(line)
+
+                    if _sensor_observation_is_backend_worthy(source, body, salience):
+                        backend_lines.append(line)
+
+                signature = "\n".join(backend_lines)
+
+                if not backend_lines:
+                    print("[sense-watch] no backend-worthy observation; skipped backend call.")
+                elif signature == last_signature:
+                    print("[sense-watch] duplicate backend-worthy observation; skipped backend call.")
+                elif now - last_backend_at < cooldown:
+                    remaining = cooldown - (now - last_backend_at)
+                    print(f"[sense-watch] backend cooldown active ({remaining:.1f}s remaining); skipped backend call.")
+                else:
+                    prompt = _sensor_prompt_from_lines(backend_lines)
+                    try:
+                        result = bot.backend.generate(prompt, [], "concise")
+                    except TypeError as exc:
+                        print(f"[system] backend direct-call signature mismatch: {exc}")
+                        return True
+
+                    answer = getattr(result, "text", None) or getattr(result, "content", None) or str(result)
+                    print(f"[hf-sensor] {answer.strip()}")
+                    backend_calls += 1
+                    last_backend_at = time.time()
+                    last_signature = signature
+
+            if cycles is not None and polls >= cycles:
+                break
+
+            time.sleep(interval)
+
+    except KeyboardInterrupt:
+        print("\n[sense-watch] stopped by user.")
+
+    print(f"[sense-watch] stopped after {polls} polls, {backend_calls} backend summaries.")
     return True
 
 
