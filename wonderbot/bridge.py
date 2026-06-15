@@ -3,6 +3,7 @@ from fastapi import UploadFile
 import argparse
 import asyncio
 import io
+import math
 import os
 import threading
 import time
@@ -17,6 +18,44 @@ def _require_token(expected: str, received: str | None) -> None:
     if received != expected:
         from fastapi import HTTPException
         raise HTTPException(status_code=401, detail='invalid bridge token')
+
+
+def _coerce_sounddevice_device(value):
+    """Return a sounddevice-compatible device selector.
+
+    sounddevice treats integer indexes and string names differently. argparse gives us
+    strings, so "9" must become integer 9 rather than a request for a device named
+    literally "9".
+    """
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return text
+
+
+def _describe_sounddevice_input(sd, device) -> str:
+    """Return a human-readable description of the selected input device."""
+    try:
+        if device is None:
+            default = sd.default.device
+            if isinstance(default, (list, tuple)):
+                input_index = default[0]
+            else:
+                input_index = default
+            info = sd.query_devices(input_index, kind='input')
+            return f"default input {input_index}: {info.get('name', '<unknown>')}"
+        info = sd.query_devices(device, kind='input')
+        return f"input {device!r}: {info.get('name', '<unknown>')}"
+    except Exception as exc:
+        selector = 'default input' if device is None else f"input {device!r}"
+        return f"{selector}: <unable to describe: {exc}>"
 
 
 @dataclass
@@ -200,6 +239,9 @@ class DesktopBridgeClient:
         channels: int = 1,
         audio_chunk_seconds: float = 0.75,
         source_name: str = 'desktop-client',
+        audio_meter: bool = False,
+        audio_meter_seconds: float = 5.0,
+        warn_silence_dbfs: float = -70.0,
     ) -> None:
         import cv2  # type: ignore
         import httpx
@@ -218,9 +260,13 @@ class DesktopBridgeClient:
         self.height = int(height)
         self.fps = max(0.5, float(fps))
         self.jpeg_quality = max(20, min(95, int(jpeg_quality)))
-        self.mic_device = mic_device
+        self.mic_device = _coerce_sounddevice_device(mic_device)
         self.sample_rate = int(sample_rate)
         self.channels = int(channels)
+        self.audio_meter = bool(audio_meter)
+        self.audio_meter_seconds = max(0.5, float(audio_meter_seconds))
+        self.warn_silence_dbfs = float(warn_silence_dbfs)
+        self._last_audio_meter_at = 0.0
         self.audio_chunk_seconds = max(0.25, float(audio_chunk_seconds))
         self.source_name = source_name
         self._stop = threading.Event()
@@ -291,11 +337,13 @@ class DesktopBridgeClient:
             cap.release()
 
     def _audio_loop(self) -> None:
+        device = self.mic_device
+        print(f'[bridge-client] audio input: {_describe_sounddevice_input(self._sd, device)}')
         self._stream = self._sd.InputStream(
             samplerate=self.sample_rate,
             channels=self.channels,
             dtype='float32',
-            device=self.mic_device or None,
+            device=device,
             latency='high',
             callback=self._audio_callback,
         )
@@ -306,6 +354,8 @@ class DesktopBridgeClient:
                 chunk = self._latest_audio()
                 if chunk.size == 0:
                     continue
+                if self.audio_meter:
+                    self._maybe_print_audio_meter(chunk)
                 buf = io.BytesIO()
                 self._sf.write(buf, chunk, self.sample_rate, format='WAV', subtype='FLOAT')
                 files = {'audio': ('audio.wav', buf.getvalue(), 'audio/wav')}
@@ -325,6 +375,25 @@ class DesktopBridgeClient:
                 self._stream.close()
             except Exception:
                 pass
+
+    def _maybe_print_audio_meter(self, chunk) -> None:
+        now = time.time()
+        if now - self._last_audio_meter_at < self.audio_meter_seconds:
+            return
+        self._last_audio_meter_at = now
+
+        data = self._np.asarray(chunk, dtype='float32').reshape(-1)
+        if data.size == 0:
+            return
+
+        peak = float(self._np.max(self._np.abs(data)))
+        rms = float(self._np.sqrt(self._np.mean(data ** 2)))
+        dbfs = 20.0 * math.log10(max(rms, 1.0e-12))
+        status = 'LOW/SILENT' if dbfs <= self.warn_silence_dbfs else 'ok'
+        print(
+            f'[bridge-client] audio level: rms_dbfs={dbfs:.1f}, '
+            f'peak={peak:.6f}, status={status}'
+        )
 
     def run(self) -> None:
         threads = [
@@ -369,6 +438,9 @@ def _client_main() -> int:
     parser.add_argument('--channels', type=int, default=1)
     parser.add_argument('--audio-chunk-seconds', type=float, default=0.75)
     parser.add_argument('--source-name', default='desktop-client')
+    parser.add_argument('--audio-meter', action='store_true', help='print periodic microphone RMS/peak levels')
+    parser.add_argument('--audio-meter-seconds', type=float, default=5.0)
+    parser.add_argument('--warn-silence-dbfs', type=float, default=-70.0)
     args = parser.parse_args()
     DesktopBridgeClient(
         server_url=args.server_url,
@@ -383,6 +455,9 @@ def _client_main() -> int:
         channels=args.channels,
         audio_chunk_seconds=args.audio_chunk_seconds,
         source_name=args.source_name,
+        audio_meter=args.audio_meter,
+        audio_meter_seconds=args.audio_meter_seconds,
+        warn_silence_dbfs=args.warn_silence_dbfs,
     ).run()
     return 0
 
