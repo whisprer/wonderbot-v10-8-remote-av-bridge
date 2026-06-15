@@ -248,3 +248,9 @@ min_confidence = 0.32
 append_to_text = true
 include_evidence = true
 
+[multimodal_affect]
+enabled = true
+visual_context_ttl_seconds = 8.0
+min_confidence = 0.34
+append_to_text = true
+

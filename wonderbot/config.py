@@ -257,6 +257,14 @@ class EmotionLiteConfig:
     append_to_text: bool = True
     include_evidence: bool = True
 
+
+@dataclass(slots=True)
+class MultimodalAffectConfig:
+    enabled: bool = True
+    visual_context_ttl_seconds: float = 8.0
+    min_confidence: float = 0.34
+    append_to_text: bool = True
+
 @dataclass(slots=True)
 class StabilityConfig:
     sensor_response_cooldown_seconds: float = 2.0
@@ -333,6 +341,7 @@ class WonderBotConfig:
     caption: CaptionConfig
     speech: SpeechConfig
     emotion_lite: EmotionLiteConfig
+    multimodal_affect: MultimodalAffectConfig
     stability: StabilityConfig
     logging: LoggingConfig
     execution: ExecutionConfig
@@ -363,6 +372,7 @@ class WonderBotConfig:
             caption=CaptionConfig(**data.get('caption', {})),
             speech=SpeechConfig(**data.get('speech', {})),
             emotion_lite=EmotionLiteConfig(**data.get('emotion_lite', {})),
+            multimodal_affect=MultimodalAffectConfig(**data.get('multimodal_affect', {})),
             stability=StabilityConfig(**data.get('stability', {})),
             logging=LoggingConfig(**data.get('logging', {})),
             execution=ExecutionConfig(**data.get('execution', {})),
