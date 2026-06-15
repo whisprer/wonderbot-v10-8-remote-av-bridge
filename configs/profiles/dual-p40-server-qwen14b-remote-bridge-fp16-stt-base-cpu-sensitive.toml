@@ -238,3 +238,10 @@ openai_base_url = "https://api.openai.com/v1"
 speak_user_responses = true
 speak_sensor_responses = false
 speak_spontaneous = false
+
+[emotion_lite]
+enabled = true
+min_confidence = 0.32
+append_to_text = true
+include_evidence = true
+

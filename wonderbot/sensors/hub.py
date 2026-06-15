@@ -163,6 +163,9 @@ def build_sensor_hub(config: WonderBotConfig) -> SensorHub:
                         utterance_max_seconds=config.microphone.utterance_max_seconds,
                         transcript_reply_min_words=config.microphone.transcript_reply_min_words,
                         store_sound_only_events=config.microphone.store_sound_only_events,
+                        emotion_lite_enabled=config.emotion_lite.enabled,
+                        emotion_lite_min_confidence=config.emotion_lite.min_confidence,
+                        emotion_lite_append_to_text=config.emotion_lite.append_to_text,
                         verify_tls=config.remote_bridge.verify_tls,
                     )
                 )
@@ -195,6 +198,9 @@ def build_sensor_hub(config: WonderBotConfig) -> SensorHub:
                         utterance_max_seconds=config.microphone.utterance_max_seconds,
                         transcript_reply_min_words=config.microphone.transcript_reply_min_words,
                         store_sound_only_events=config.microphone.store_sound_only_events,
+                        emotion_lite_enabled=config.emotion_lite.enabled,
+                        emotion_lite_min_confidence=config.emotion_lite.min_confidence,
+                        emotion_lite_append_to_text=config.emotion_lite.append_to_text,
                     )
                 )
                 statuses.append(SensorStatus(source="microphone", enabled=True, available=True, detail=f"microphone adapter active; {speech_detail}"))

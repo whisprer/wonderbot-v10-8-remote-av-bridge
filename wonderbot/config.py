@@ -245,6 +245,15 @@ class SpeechConfig:
     cooldown_seconds: float = 0.20
 
 
+
+
+@dataclass(slots=True)
+class EmotionLiteConfig:
+    enabled: bool = True
+    min_confidence: float = 0.32
+    append_to_text: bool = True
+    include_evidence: bool = True
+
 @dataclass(slots=True)
 class StabilityConfig:
     sensor_response_cooldown_seconds: float = 2.0
@@ -320,6 +329,7 @@ class WonderBotConfig:
     microphone: MicrophoneConfig
     caption: CaptionConfig
     speech: SpeechConfig
+    emotion_lite: EmotionLiteConfig
     stability: StabilityConfig
     logging: LoggingConfig
     execution: ExecutionConfig
@@ -349,6 +359,7 @@ class WonderBotConfig:
             microphone=MicrophoneConfig(**data.get('microphone', {})),
             caption=CaptionConfig(**data.get('caption', {})),
             speech=SpeechConfig(**data.get('speech', {})),
+            emotion_lite=EmotionLiteConfig(**data.get('emotion_lite', {})),
             stability=StabilityConfig(**data.get('stability', {})),
             logging=LoggingConfig(**data.get('logging', {})),
             execution=ExecutionConfig(**data.get('execution', {})),

@@ -543,6 +543,13 @@ def _format_journal_event(event: dict) -> str:
         source = event.get("source", "sensor")
         salience = event.get("salience", 0.0)
         text = event.get("text", "")
+        metadata = event.get("metadata", {}) or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        affect_label = metadata.get("affect_label")
+        affect_confidence = metadata.get("affect_confidence")
+        if affect_label and metadata.get("affect_should_report") and "Affect estimate:" not in str(text):
+            text = f"{text} Affect estimate: possibly {str(affect_label).replace('-', ' ')} (confidence={float(affect_confidence or 0.0):.2f})."
         backend_worthy = event.get("backend_worthy", False)
         reason = event.get("reject_reason")
         suffix = "backend-worthy" if backend_worthy else f"skipped: {reason or 'not backend-worthy'}"
@@ -636,6 +643,7 @@ def _sensor_prompt_from_lines(observation_lines: list[str]) -> str:
         "If audio contains a transcript, mention the transcript briefly. "
         "If audio says transcriber disabled or sound-only, say audio was detected but not transcribed. "
         "For camera Vision-Lite observations, describe only motion, lighting, sharpness, texture, and scene-change signals. "
+        "If an observation includes an Affect estimate, treat it as tentative inferred metadata rather than fact. "
         "Do not identify objects, people, mood, location, or activity unless the observation explicitly says so.\n\n"
         + "\n".join(observation_lines)
     )

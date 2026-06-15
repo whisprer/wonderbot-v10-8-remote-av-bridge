@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import List
 
 from .base import SensorObservation, SensorStatus
+from .emotion_lite import EmotionLiteEstimator, apply_emotion_lite_to_text_and_metadata
 from .camera import _clean_generated_text, _normalize_text as _normalize_camera_text
 from .vision_lite import (
     VisionLiteAnalyzer,
@@ -258,6 +259,9 @@ class RemoteMicrophoneAdapter:
         utterance_max_seconds: float = 8.0,
         transcript_reply_min_words: int = 2,
         store_sound_only_events: bool = False,
+        emotion_lite_enabled: bool = True,
+        emotion_lite_min_confidence: float = 0.32,
+        emotion_lite_append_to_text: bool = True,
         verify_tls: bool = True,
     ) -> None:
         try:
@@ -295,6 +299,13 @@ class RemoteMicrophoneAdapter:
         self.utterance_max_seconds = max(self.silence_endpoint_seconds, float(utterance_max_seconds))
         self.transcript_reply_min_words = max(1, int(transcript_reply_min_words))
         self.store_sound_only_events = bool(store_sound_only_events)
+        self.emotion_lite_enabled = bool(emotion_lite_enabled)
+        self.emotion_lite_append_to_text = bool(emotion_lite_append_to_text)
+        self._emotion_lite = (
+            EmotionLiteEstimator(min_confidence=emotion_lite_min_confidence)
+            if self.emotion_lite_enabled
+            else None
+        )
         self._prev_rms = 0.0
         self._prev_zcr = 0.0
         self._last_text = ''
@@ -307,6 +318,9 @@ class RemoteMicrophoneAdapter:
         self._utterance_started_at = 0.0
         self._utterance_last_fragment_at = 0.0
         self._utterance_last_salience = 0.0
+        self._utterance_last_rms = 0.0
+        self._utterance_last_peak = 0.0
+        self._utterance_last_zcr = 0.0
         self._utterance_sample_rate = int(sample_rate)
         self._utterance_device = 'remote-bridge'
         self._resolved_sample_rate = int(sample_rate)
@@ -369,7 +383,7 @@ class RemoteMicrophoneAdapter:
             transcript = str(transcript_info['transcript'])
             metadata['transcript_fragment'] = transcript
             metadata['memory_eligible'] = False
-            self._append_utterance_fragment(transcript, salience=salience, sample_rate=resolved_rate)
+            self._append_utterance_fragment(transcript, salience=salience, sample_rate=resolved_rate, rms=rms, peak=peak, zcr=zcr)
             if self._utterance_should_flush_immediately(transcript):
                 finalized = self._finalize_utterance(reason='punctuation')
                 if finalized is not None:
@@ -400,6 +414,8 @@ class RemoteMicrophoneAdapter:
             detail += f'; speech transcription via {getattr(self.transcriber, "model_name", "transcriber")}'
         if self.vad_enabled:
             detail += '; frontend VAD enabled'
+        if getattr(self, 'emotion_lite_enabled', False):
+            detail += '; emotion-lite affect estimates active'
         return SensorStatus(source=self.name, enabled=True, available=True, detail=detail)
 
     def close(self) -> None:
@@ -477,7 +493,7 @@ class RemoteMicrophoneAdapter:
         info['transcript'] = text
         return info
 
-    def _append_utterance_fragment(self, transcript: str, salience: float, sample_rate: int) -> None:
+    def _append_utterance_fragment(self, transcript: str, salience: float, sample_rate: int, rms: float = 0.0, peak: float = 0.0, zcr: float = 0.0) -> None:
         transcript = _clean_transcript(transcript)
         if not transcript:
             return
@@ -488,6 +504,9 @@ class RemoteMicrophoneAdapter:
             self._utterance_started_at = now
         self._utterance_last_fragment_at = now
         self._utterance_last_salience = max(float(salience), float(self._utterance_last_salience))
+        self._utterance_last_rms = max(float(rms), float(getattr(self, '_utterance_last_rms', 0.0)))
+        self._utterance_last_peak = max(float(peak), float(getattr(self, '_utterance_last_peak', 0.0)))
+        self._utterance_last_zcr = float(zcr)
         self._utterance_sample_rate = int(sample_rate)
         fragment = transcript.strip()
         if self._utterance_fragments:
@@ -522,6 +541,9 @@ class RemoteMicrophoneAdapter:
         transcript = _clean_transcript(' '.join(self._utterance_fragments))
         salience = round(float(self._utterance_last_salience), 6)
         sample_rate = int(self._utterance_sample_rate)
+        utterance_rms = round(float(getattr(self, '_utterance_last_rms', 0.0)), 6)
+        utterance_peak = round(float(getattr(self, '_utterance_last_peak', 0.0)), 6)
+        utterance_zcr = round(float(getattr(self, '_utterance_last_zcr', 0.0)), 6)
         self._reset_utterance()
         if not transcript or len(transcript.split()) < self.transcript_reply_min_words:
             return None
@@ -535,7 +557,17 @@ class RemoteMicrophoneAdapter:
             'memory_eligible': True,
             'utterance_final': True,
             'remote_bridge': True,
+            'utterance_rms': utterance_rms,
+            'utterance_peak': utterance_peak,
+            'utterance_zcr': utterance_zcr,
         }
+        text, metadata = apply_emotion_lite_to_text_and_metadata(
+            text,
+            metadata,
+            getattr(self, '_emotion_lite', None),
+            salience=salience,
+            append_to_text=bool(getattr(self, 'emotion_lite_append_to_text', True)),
+        )
         self._last_transcript = transcript
         self._last_transcript_at = time.monotonic()
         self._last_text = text
@@ -546,6 +578,9 @@ class RemoteMicrophoneAdapter:
         self._utterance_started_at = 0.0
         self._utterance_last_fragment_at = 0.0
         self._utterance_last_salience = 0.0
+        self._utterance_last_rms = 0.0
+        self._utterance_last_peak = 0.0
+        self._utterance_last_zcr = 0.0
 
     def _frontend_vad(self, audio, sample_rate: int) -> dict[str, object]:
         data = self._np.asarray(audio, dtype='float32').reshape(-1)
