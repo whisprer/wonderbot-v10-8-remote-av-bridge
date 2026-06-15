@@ -8,6 +8,7 @@ import re
 import time
 import warnings
 from difflib import SequenceMatcher
+from pathlib import Path
 
 from .agent import AgentTurn, WonderBot
 from .config import WonderBotConfig
@@ -187,7 +188,7 @@ def _handle_command(line: str, bot: WonderBot) -> bool:
     arg = rest[0] if rest else ""
     if command == "/help":
         print(
-            "/tick [n]  /sense  /sense-summary  /sense-ask  /sense-watch [cycles] [interval] [cooldown]  /watch [n]  /sensors  /diagnostics  /focus  /voice on|off  "
+            "/tick [n]  /sense  /sense-summary  /sense-ask  /sense-watch [cycles] [interval] [cooldown]  /sense-journal [n]  /sense-journal-clear  /watch [n]  /sensors  /diagnostics  /focus  /voice on|off  "
             "/state  /memory [n]  /stm [n]  /ltm [kind] [n]  /self [kind] [n]  /preferences  /goals [status] [n]  /goal ...  "
             "/plans [status] [n]  /plan ...  /next [n]  /queue [n]  /tools  /runs [n]  /act ...  "
             "/search <query>  /remember <query>  /consolidate  /reflect  /sleep  /dream [n]  /journal [kind] [n]  /tasks  /beliefs  /threads  /save  /quit"
@@ -280,6 +281,12 @@ def _handle_command(line: str, bot: WonderBot) -> bool:
 
     if command == "/sense-watch":
         return _handle_sense_watch(arg, bot)
+
+    if command == "/sense-journal":
+        return _handle_sense_journal(arg)
+
+    if command == "/sense-journal-clear":
+        return _handle_sense_journal_clear(arg)
 
     if command == "/sensors":
         for status in bot.sensor_hub.status():
@@ -477,6 +484,140 @@ def _handle_command(line: str, bot: WonderBot) -> bool:
     return True
 
 
+def _live_lite_journal_path() -> Path:
+    return Path("state") / "live_lite_events.jsonl"
+
+
+def _journal_timestamp(ts: float | None = None) -> tuple[float, str]:
+    if ts is None:
+        ts = time.time()
+    return ts, time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(ts))
+
+
+def _append_live_lite_journal(event: dict) -> None:
+    """Append a structured live-lite event to state/live_lite_events.jsonl.
+
+    This is intentionally a sidecar event log, not memory promotion. It lets us
+    inspect what WonderBot sensed and why the backend did or did not run without
+    feeding every event back into Qwen context.
+    """
+    path = _live_lite_journal_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    ts_unix, ts_local = _journal_timestamp()
+    payload = {
+        "ts_unix": ts_unix,
+        "ts_local": ts_local,
+        **event,
+    }
+
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _read_live_lite_journal(limit: int = 20) -> list[dict]:
+    path = _live_lite_journal_path()
+    if not path.exists():
+        return []
+
+    limit = max(1, min(500, int(limit)))
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    events: list[dict] = []
+
+    for line in lines[-limit:]:
+        if not line.strip():
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            events.append({"kind": "journal_parse_error", "raw": line})
+
+    return events
+
+
+def _format_journal_event(event: dict) -> str:
+    ts = event.get("ts_local", "<unknown-time>")
+    kind = event.get("kind", "event")
+
+    if kind == "sensor_observation":
+        source = event.get("source", "sensor")
+        salience = event.get("salience", 0.0)
+        text = event.get("text", "")
+        backend_worthy = event.get("backend_worthy", False)
+        reason = event.get("reject_reason")
+        suffix = "backend-worthy" if backend_worthy else f"skipped: {reason or 'not backend-worthy'}"
+        return f"{ts} [{source}] salience={salience:.2f} {suffix} :: {text}"
+
+    if kind == "backend_summary":
+        response = event.get("response", "")
+        return f"{ts} [hf-sensor] {response}"
+
+    if kind == "backend_skip":
+        reason = event.get("reason", "unknown")
+        return f"{ts} [sense-watch] backend skipped: {reason}"
+
+    if kind == "poll_empty":
+        return f"{ts} [sense-watch] poll {event.get('poll', '?')}: no salient sensor event"
+
+    if kind == "watch_start":
+        return (
+            f"{ts} [sense-watch] start cycles={event.get('cycles')} "
+            f"interval={event.get('interval')} cooldown={event.get('cooldown')}"
+        )
+
+    if kind == "watch_stop":
+        return (
+            f"{ts} [sense-watch] stop polls={event.get('polls')} "
+            f"backend_summaries={event.get('backend_calls')} reason={event.get('reason')}"
+        )
+
+    return f"{ts} [{kind}] {json.dumps(event, ensure_ascii=False, sort_keys=True)}"
+
+
+def _handle_sense_journal(arg: str) -> bool:
+    arg = arg.strip()
+    if arg in {"clear", "--clear"}:
+        return _handle_sense_journal_clear("")
+
+    if arg in {"help", "-h", "--help"}:
+        print("Usage: /sense-journal [n]")
+        print("Usage: /sense-journal-clear")
+        return True
+
+    limit = int(arg) if arg and arg.isdigit() else 20
+    events = _read_live_lite_journal(limit)
+
+    if not events:
+        print("[sense-journal] no live-lite journal events yet.")
+        return True
+
+    print(f"[sense-journal] showing last {len(events)} event(s) from {_live_lite_journal_path()}")
+    for event in events:
+        print("- " + _format_journal_event(event))
+    return True
+
+
+def _handle_sense_journal_clear(arg: str) -> bool:
+    arg = arg.strip().lower()
+    if arg not in {"", "yes", "--yes"}:
+        print("Usage: /sense-journal-clear")
+        return True
+
+    path = _live_lite_journal_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if path.exists():
+        archive = path.with_name(f"live_lite_events.{int(time.time())}.jsonl.bak")
+        path.rename(archive)
+        print(f"[sense-journal] archived previous journal to {archive}")
+    else:
+        print("[sense-journal] no existing journal to archive.")
+
+    path.write_text("", encoding="utf-8")
+    print(f"[sense-journal] cleared {path}")
+    return True
+
+
 def _sensor_observation_parts(obs) -> tuple[str, str, float]:
     source = getattr(obs, "source", "sensor")
     body = getattr(obs, "text", None) or str(obs)
@@ -644,6 +785,12 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
         f"interval={interval:.1f}s, backend_cooldown={cooldown:.1f}s"
     )
     print("[sense-watch] Ctrl+C stops watch mode and returns to the CLI.")
+    _append_live_lite_journal({
+        "kind": "watch_start",
+        "cycles": cycle_label,
+        "interval": interval,
+        "cooldown": cooldown,
+    })
 
     polls = 0
     backend_calls = 0
@@ -659,6 +806,10 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
 
             if not observations:
                 print(f"[sense-watch] poll {polls}: no salient sensor event.")
+                _append_live_lite_journal({
+                    "kind": "poll_empty",
+                    "poll": polls,
+                })
             else:
                 observation_lines = []
                 backend_lines = []
@@ -671,6 +822,16 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
                     observation_lines.append(line)
 
                     reject_reason = _sensor_observation_backend_reject_reason(source, body, salience)
+                    _append_live_lite_journal({
+                        "kind": "sensor_observation",
+                        "poll": polls,
+                        "source": source,
+                        "text": body,
+                        "salience": salience,
+                        "backend_worthy": reject_reason is None,
+                        "reject_reason": reject_reason,
+                    })
+
                     if reject_reason is not None:
                         reject_reasons.append(reject_reason)
                         continue
@@ -684,6 +845,12 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
                         )
                         if is_repeat:
                             reject_reasons.append("repeat/overlapping transcript")
+                            _append_live_lite_journal({
+                                "kind": "backend_skip",
+                                "poll": polls,
+                                "reason": "repeat/overlapping transcript",
+                                "lines": [line],
+                            })
                             continue
 
                     backend_lines.append(line)
@@ -695,12 +862,32 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
                         reason_text = "; ".join(sorted(set(reject_reasons)))
                         print(f"[sense-watch] skipped backend: {reason_text}.")
                     else:
+                        reason_text = "no backend-worthy observation"
                         print("[sense-watch] no backend-worthy observation; skipped backend call.")
+                    _append_live_lite_journal({
+                        "kind": "backend_skip",
+                        "poll": polls,
+                        "reason": reason_text,
+                        "lines": observation_lines,
+                    })
                 elif signature == last_signature:
                     print("[sense-watch] duplicate backend-worthy observation; skipped backend call.")
+                    _append_live_lite_journal({
+                        "kind": "backend_skip",
+                        "poll": polls,
+                        "reason": "duplicate backend-worthy observation",
+                        "lines": backend_lines,
+                    })
                 elif now - last_backend_at < cooldown:
                     remaining = cooldown - (now - last_backend_at)
                     print(f"[sense-watch] backend cooldown active ({remaining:.1f}s remaining); skipped backend call.")
+                    _append_live_lite_journal({
+                        "kind": "backend_skip",
+                        "poll": polls,
+                        "reason": "cooldown",
+                        "cooldown_remaining": remaining,
+                        "lines": backend_lines,
+                    })
                 else:
                     prompt = _sensor_prompt_from_lines(backend_lines)
                     try:
@@ -710,10 +897,18 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
                         return True
 
                     answer = getattr(result, "text", None) or getattr(result, "content", None) or str(result)
-                    print(f"[hf-sensor] {answer.strip()}")
+                    answer_text = answer.strip()
+                    print(f"[hf-sensor] {answer_text}")
                     backend_calls += 1
                     last_backend_at = time.time()
                     last_signature = signature
+                    _append_live_lite_journal({
+                        "kind": "backend_summary",
+                        "poll": polls,
+                        "lines": backend_lines,
+                        "response": answer_text,
+                        "backend_calls": backend_calls,
+                    })
 
             if cycles is not None and polls >= cycles:
                 break
@@ -722,7 +917,16 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
 
     except KeyboardInterrupt:
         print("\n[sense-watch] stopped by user.")
+        stop_reason = "keyboard_interrupt"
+    else:
+        stop_reason = "completed"
 
+    _append_live_lite_journal({
+        "kind": "watch_stop",
+        "polls": polls,
+        "backend_calls": backend_calls,
+        "reason": stop_reason,
+    })
     print(f"[sense-watch] stopped after {polls} polls, {backend_calls} backend summaries.")
     return True
 
