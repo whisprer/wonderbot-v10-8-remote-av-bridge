@@ -77,9 +77,11 @@ class EmotionLiteEstimator:
 
         _match_any(norm, _UNCERTAIN_PATTERNS, lambda pat: add("uncertain", 0.22, _evidence_text("uncertainty phrase", pat)))
         _match_any(norm, _AMUSED_PATTERNS, lambda pat: add("amused", 0.30, _evidence_text("amusement cue", pat)))
+        _match_any(norm, _SMILE_PATTERNS, lambda pat: add("amused", 0.24, _evidence_text("smile/joy cue", pat)))
         _match_any(norm, _FRUSTRATED_PATTERNS, lambda pat: add("frustrated", 0.28, _evidence_text("frustration cue", pat)))
         _match_any(norm, _TIRED_PATTERNS, lambda pat: add("tired", 0.28, _evidence_text("tiredness cue", pat)))
         _match_any(norm, _ENGAGED_PATTERNS, lambda pat: add("engaged", 0.20, _evidence_text("engagement cue", pat)))
+        _match_any(norm, _POSITIVE_PATTERNS, lambda pat: add("engaged", 0.26, _evidence_text("positive cue", pat)))
         _match_any(norm, _DISTRESSED_PATTERNS, lambda pat: add("distressed-lite", 0.34, _evidence_text("distress cue", pat)))
 
         question_count = raw.count("?")
@@ -105,9 +107,9 @@ class EmotionLiteEstimator:
             if scores["frustrated"] > 0.0:
                 scores["frustrated"] += 0.06
             elif scores["amused"] > 0.0:
-                scores["amused"] += 0.05
+                scores["amused"] += 0.06
             elif scores["engaged"] > 0.0:
-                scores["engaged"] += 0.05
+                scores["engaged"] += 0.07
         elif audio_arousal <= 0.24 and scores["tired"] > 0.0:
             scores["tired"] += 0.05
             evidence.append("low audio arousal")
@@ -554,6 +556,18 @@ _AMUSED_PATTERNS = (
     ":)",
 )
 
+_SMILE_PATTERNS = (
+    "yay",
+    "woo",
+    "wooo",
+    "smile",
+    "smiling",
+    "cheerful",
+    "fun",
+    "joy",
+    "joyful",
+)
+
 _FRUSTRATED_PATTERNS = (
     "fuck",
     "fucking",
@@ -606,6 +620,24 @@ _ENGAGED_PATTERNS = (
     "reckon",
     "we can",
     "let us",
+)
+
+
+_POSITIVE_PATTERNS = (
+    "happy",
+    "happier",
+    "happiness",
+    "pleased",
+    "delighted",
+    "glad",
+    "lovely",
+    "brilliant",
+    "love it",
+    "love this",
+    "i love",
+    "working",
+    "it works",
+    "that works",
 )
 
 _DISTRESSED_PATTERNS = (
