@@ -1,0 +1,18 @@
+[Unit]
+Description=WonderBot dual-P40 server profile
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/srv/wonderbot
+Environment=HF_HOME=/srv/weights/wonderbot/hf-cache
+Environment=TRANSFORMERS_CACHE=/srv/weights/wonderbot/hf-cache
+Environment=BITSANDBYTES_NOWELCOME=1
+ExecStart=/srv/wonderbot/.venv/bin/python -m wonderbot.cli --config /srv/wonderbot/configs/profiles/dual-p40-server-qwen14b.toml --diagnostics
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -43,3 +43,8 @@ Thumbs.db
 *.jpeg
 *.png
 *.webm
+.env
+wonderbot.egg-info/
+
+# Runtime/local state
+state/
