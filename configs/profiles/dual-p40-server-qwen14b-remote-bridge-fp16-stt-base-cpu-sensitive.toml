@@ -146,6 +146,15 @@ height = 240
 motion_threshold = 0.08
 brightness_threshold = 0.05
 min_salience = 0.12
+vision_lite_enabled = true
+vision_lite_analysis_width = 320
+vision_lite_motion_pixel_threshold = 18.0
+vision_lite_scene_change_threshold = 0.22
+vision_lite_backend_min_salience = 0.35
+vision_lite_sharpness_reference = 120.0
+vision_lite_face_hint_enabled = false
+vision_lite_face_hint_min_interval_seconds = 5.0
+vision_lite_state_change_cooldown_seconds = 3.0
 
 [microphone]
 enabled = true

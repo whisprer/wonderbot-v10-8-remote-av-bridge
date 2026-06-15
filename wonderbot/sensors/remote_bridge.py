@@ -7,7 +7,13 @@ from dataclasses import dataclass
 from typing import List
 
 from .base import SensorObservation, SensorStatus
-from .camera import _brightness_phrase, _clean_generated_text, _normalize_text as _normalize_camera_text
+from .camera import _clean_generated_text, _normalize_text as _normalize_camera_text
+from .vision_lite import (
+    VisionLiteAnalyzer,
+    brightness_phrase as _brightness_phrase,
+    format_vision_lite_text,
+    metrics_metadata,
+)
 from .microphone import _clean_transcript, _normalize_text as _normalize_mic_text, _suffix_prefix_overlap
 from ..perception import ImageCaptioner, SpeechTranscriber
 
@@ -40,6 +46,15 @@ class RemoteCameraAdapter:
         caption_salience_threshold: float = 0.22,
         caption_min_chars: int = 12,
         verify_tls: bool = True,
+        vision_lite_enabled: bool = True,
+        analysis_width: int = 320,
+        motion_pixel_threshold: float = 18.0,
+        scene_change_threshold: float = 0.22,
+        backend_min_salience: float = 0.35,
+        sharpness_reference: float = 120.0,
+        face_hint_enabled: bool = False,
+        face_hint_min_interval_seconds: float = 5.0,
+        state_change_cooldown_seconds: float = 3.0,
     ) -> None:
         try:
             import cv2  # type: ignore
@@ -60,7 +75,23 @@ class RemoteCameraAdapter:
         self.caption_interval_seconds = caption_interval_seconds
         self.caption_salience_threshold = caption_salience_threshold
         self.caption_min_chars = caption_min_chars
+        self.vision_lite_enabled = bool(vision_lite_enabled)
         self._client = httpx.Client(timeout=request_timeout_seconds, verify=verify_tls)
+        self._vision = VisionLiteAnalyzer(
+            cv2,
+            np,
+            motion_threshold=motion_threshold,
+            brightness_threshold=brightness_threshold,
+            min_salience=min_salience,
+            analysis_width=analysis_width,
+            motion_pixel_threshold=motion_pixel_threshold,
+            scene_change_threshold=scene_change_threshold,
+            backend_min_salience=backend_min_salience,
+            sharpness_reference=sharpness_reference,
+            face_hint_enabled=face_hint_enabled,
+            face_hint_min_interval_seconds=face_hint_min_interval_seconds,
+            state_change_cooldown_seconds=state_change_cooldown_seconds,
+        )
         self._prev_gray = None
         self._prev_brightness = None
         self._last_text = ''
@@ -87,6 +118,46 @@ class RemoteCameraAdapter:
 
     def poll(self) -> List[SensorObservation]:
         frame = self.read_frame()
+        if self.vision_lite_enabled:
+            return self._poll_vision_lite(frame)
+        return self._poll_legacy(frame)
+
+    def status(self) -> SensorStatus:
+        detail = f'remote camera adapter active ({self.base_url})'
+        if self.vision_lite_enabled:
+            detail += '; vision-lite metrics active'
+            if self._vision.face_hint_enabled:
+                if self._vision.face_hint_available:
+                    detail += '; OpenCV face-ish hints enabled'
+                else:
+                    detail += '; OpenCV face-ish hints requested but cascade unavailable'
+        if self.captioner is not None:
+            detail += f'; captioning via {getattr(self.captioner, "model_name", "captioner")}'
+        return SensorStatus(source=self.name, enabled=True, available=True, detail=detail)
+
+    def close(self) -> None:
+        self._client.close()
+
+    def _poll_vision_lite(self, frame) -> List[SensorObservation]:
+        was_initialized = self._vision.initialized
+        metrics = self._vision.analyze(frame, remote_timestamp_ms=self._last_timestamp_ms)
+        if not was_initialized:
+            return []
+        if not self._vision.should_report(metrics):
+            return []
+
+        text = format_vision_lite_text(metrics)
+        metadata = metrics_metadata(metrics, remote_bridge=True)
+        caption = self._maybe_caption(frame, metrics.salience)
+        if caption:
+            text = f'{text} Scene impression: {caption}.'
+            metadata['caption'] = caption
+        if text == self._last_text and metrics.salience < 0.45 and not metrics.visual_state_changed:
+            return []
+        self._last_text = text
+        return [SensorObservation(source=self.name, text=text, salience=round(metrics.salience, 6), metadata=metadata)]
+
+    def _poll_legacy(self, frame) -> List[SensorObservation]:
         gray = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2GRAY)
         metrics = self._analyze(gray)
         if self._prev_gray is None:
@@ -112,6 +183,7 @@ class RemoteCameraAdapter:
             'contrast': round(metrics.contrast, 6),
             'remote_timestamp_ms': self._last_timestamp_ms,
             'remote_bridge': True,
+            'vision_lite': False,
         }
         caption = self._maybe_caption(frame, salience)
         if caption:
@@ -121,15 +193,6 @@ class RemoteCameraAdapter:
             return []
         self._last_text = text
         return [SensorObservation(source=self.name, text=text, salience=round(salience, 6), metadata=metadata)]
-
-    def status(self) -> SensorStatus:
-        detail = f'remote camera adapter active ({self.base_url})'
-        if self.captioner is not None:
-            detail += f'; captioning via {getattr(self.captioner, "model_name", "captioner")}'
-        return SensorStatus(source=self.name, enabled=True, available=True, detail=detail)
-
-    def close(self) -> None:
-        self._client.close()
 
     def _analyze(self, gray) -> CameraMetrics:
         brightness = float(gray.mean()) / 255.0

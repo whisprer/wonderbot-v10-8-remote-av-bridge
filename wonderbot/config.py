@@ -188,6 +188,15 @@ class CameraConfig:
     motion_threshold: float = 0.08
     brightness_threshold: float = 0.05
     min_salience: float = 0.12
+    vision_lite_enabled: bool = True
+    vision_lite_analysis_width: int = 320
+    vision_lite_motion_pixel_threshold: float = 18.0
+    vision_lite_scene_change_threshold: float = 0.22
+    vision_lite_backend_min_salience: float = 0.35
+    vision_lite_sharpness_reference: float = 120.0
+    vision_lite_face_hint_enabled: bool = False
+    vision_lite_face_hint_min_interval_seconds: float = 5.0
+    vision_lite_state_change_cooldown_seconds: float = 3.0
 
 
 @dataclass(slots=True)

@@ -618,11 +618,14 @@ def _handle_sense_journal_clear(arg: str) -> bool:
     return True
 
 
-def _sensor_observation_parts(obs) -> tuple[str, str, float]:
+def _sensor_observation_parts(obs) -> tuple[str, str, float, dict[str, object]]:
     source = getattr(obs, "source", "sensor")
     body = getattr(obs, "text", None) or str(obs)
     salience = float(getattr(obs, "salience", 0.0) or 0.0)
-    return str(source), str(body), salience
+    metadata = getattr(obs, "metadata", {}) or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return str(source), str(body), salience, metadata
 
 
 def _sensor_prompt_from_lines(observation_lines: list[str]) -> str:
@@ -631,7 +634,9 @@ def _sensor_prompt_from_lines(observation_lines: list[str]) -> str:
         "Use only the observations below. "
         "Do not invent temperature, weather, location, object identity, or environmental readings. "
         "If audio contains a transcript, mention the transcript briefly. "
-        "If audio says transcriber disabled or sound-only, say audio was detected but not transcribed.\n\n"
+        "If audio says transcriber disabled or sound-only, say audio was detected but not transcribed. "
+        "For camera Vision-Lite observations, describe only motion, lighting, sharpness, texture, and scene-change signals. "
+        "Do not identify objects, people, mood, location, or activity unless the observation explicitly says so.\n\n"
         + "\n".join(observation_lines)
     )
 
@@ -666,10 +671,16 @@ def _transcript_similarity(left: str, right: str) -> float:
     return SequenceMatcher(None, left_norm, right_norm).ratio()
 
 
-def _sensor_observation_backend_reject_reason(source: str, body: str, salience: float) -> str | None:
+def _sensor_observation_backend_reject_reason(
+    source: str,
+    body: str,
+    salience: float,
+    metadata: dict[str, object] | None = None,
+) -> str | None:
     """Return a short reason if an observation should not trigger Qwen."""
     source_lower = source.lower()
     body_lower = body.lower()
+    metadata = metadata or {}
 
     if (
         "stt: sound only" in body_lower
@@ -697,6 +708,19 @@ def _sensor_observation_backend_reject_reason(source: str, body: str, salience: 
         return None
 
     if "camera" in source_lower or body_lower.startswith("camera "):
+        if bool(metadata.get("vision_lite")):
+            backend_hint = bool(metadata.get("backend_hint"))
+            visual_state_changed = bool(metadata.get("visual_state_changed"))
+            scene_change_score = float(metadata.get("scene_change_score", 0.0) or 0.0)
+            if backend_hint:
+                return None
+            if visual_state_changed:
+                return "vision-lite state change below backend threshold"
+            if scene_change_score < 0.22:
+                return "low-salience vision-lite scene change"
+            if salience < 0.35:
+                return "low-salience vision-lite observation"
+            return None
         if salience < 0.30:
             return "low-salience camera motion"
         return None
@@ -707,8 +731,13 @@ def _sensor_observation_backend_reject_reason(source: str, body: str, salience: 
     return None
 
 
-def _sensor_observation_is_backend_worthy(source: str, body: str, salience: float) -> bool:
-    return _sensor_observation_backend_reject_reason(source, body, salience) is None
+def _sensor_observation_is_backend_worthy(
+    source: str,
+    body: str,
+    salience: float,
+    metadata: dict[str, object] | None = None,
+) -> bool:
+    return _sensor_observation_backend_reject_reason(source, body, salience, metadata) is None
 
 
 def _sense_watch_transcript_is_repeat(
@@ -816,18 +845,19 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
                 reject_reasons = []
 
                 for obs in observations:
-                    source, body, salience = _sensor_observation_parts(obs)
+                    source, body, salience, metadata = _sensor_observation_parts(obs)
                     print(f"[{source}] {body} (salience={salience:.2f})")
                     line = f"- [{source}] {body}"
                     observation_lines.append(line)
 
-                    reject_reason = _sensor_observation_backend_reject_reason(source, body, salience)
+                    reject_reason = _sensor_observation_backend_reject_reason(source, body, salience, metadata)
                     _append_live_lite_journal({
                         "kind": "sensor_observation",
                         "poll": polls,
                         "source": source,
                         "text": body,
                         "salience": salience,
+                        "metadata": metadata,
                         "backend_worthy": reject_reason is None,
                         "reject_reason": reject_reason,
                     })
