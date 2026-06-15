@@ -421,6 +421,33 @@ def _sensor_prompt_from_lines(observation_lines: list[str]) -> str:
     )
 
 
+def _sensor_observation_is_backend_worthy(source: str, body: str, salience: float) -> bool:
+    """Decide whether a sensor observation deserves a Qwen backend call.
+
+    The watch loop should print all salient sensor diagnostics, but only spend
+    backend tokens on observations likely to be meaningful. In particular,
+    low-salience camera motion and VAD-rejected sound-only microphone events are
+    useful diagnostics but noisy backend prompts.
+    """
+    source_lower = source.lower()
+    body_lower = body.lower()
+
+    if "transcript accepted" in body_lower or "microphone catches speech:" in body_lower:
+        return True
+
+    if (
+        "stt: sound only" in body_lower
+        or "vad rejected" in body_lower
+        or "transcriber disabled" in body_lower
+    ):
+        return False
+
+    if "camera" in source_lower or body_lower.startswith("camera "):
+        return salience >= 0.30
+
+    return salience >= 0.75
+
+
 def _parse_sense_watch_args(arg: str) -> tuple[int | None, float, float] | None:
     parts = arg.split()
     cycles: int | None = 20
@@ -486,19 +513,28 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
                 print(f"[sense-watch] poll {polls}: no salient sensor event.")
             else:
                 observation_lines = []
+                backend_lines = []
+
                 for obs in observations:
                     source, body, salience = _sensor_observation_parts(obs)
                     print(f"[{source}] {body} (salience={salience:.2f})")
-                    observation_lines.append(f"- [{source}] {body}")
+                    line = f"- [{source}] {body}"
+                    observation_lines.append(line)
 
-                signature = "\n".join(observation_lines)
-                if signature == last_signature:
-                    print("[sense-watch] duplicate observation; skipped backend call.")
+                    if _sensor_observation_is_backend_worthy(source, body, salience):
+                        backend_lines.append(line)
+
+                signature = "\n".join(backend_lines)
+
+                if not backend_lines:
+                    print("[sense-watch] no backend-worthy observation; skipped backend call.")
+                elif signature == last_signature:
+                    print("[sense-watch] duplicate backend-worthy observation; skipped backend call.")
                 elif now - last_backend_at < cooldown:
                     remaining = cooldown - (now - last_backend_at)
                     print(f"[sense-watch] backend cooldown active ({remaining:.1f}s remaining); skipped backend call.")
                 else:
-                    prompt = _sensor_prompt_from_lines(observation_lines)
+                    prompt = _sensor_prompt_from_lines(backend_lines)
                     try:
                         result = bot.backend.generate(prompt, [], "concise")
                     except TypeError as exc:
@@ -508,7 +544,7 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
                     answer = getattr(result, "text", None) or getattr(result, "content", None) or str(result)
                     print(f"[hf-sensor] {answer.strip()}")
                     backend_calls += 1
-                    last_backend_at = now
+                    last_backend_at = time.time()
                     last_signature = signature
 
             if cycles is not None and polls >= cycles:
