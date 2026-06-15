@@ -2,11 +2,70 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import os
+import re
 import time
+import warnings
+from difflib import SequenceMatcher
 
 from .agent import AgentTurn, WonderBot
 from .config import WonderBotConfig
 from .execution import parse_kv_args
+
+
+class _DropKnownWhisperNoise(logging.Filter):
+    _NEEDLES = (
+        "return_token_timestamps is deprecated for WhisperFeatureExtractor",
+        "Using custom `forced_decoder_ids` from the (generation) config",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not any(needle in message for needle in self._NEEDLES)
+
+
+def _suppress_known_whisper_noise() -> None:
+    """Suppress known harmless Whisper/Transformers warning spam.
+
+    These messages are emitted during Whisper STT generation and clutter live-lite
+    output. They do not indicate a bridge/STT failure.
+    """
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*return_token_timestamps.*WhisperFeatureExtractor.*",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*forced_decoder_ids.*deprecated.*task.*language.*",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*The attention mask is not set.*",
+    )
+
+    filt = _DropKnownWhisperNoise()
+    for logger_name in (
+        "",
+        "py.warnings",
+        "transformers",
+        "transformers.generation",
+        "transformers.generation.utils",
+        "transformers.models.whisper",
+        "transformers.models.whisper.generation_whisper",
+        "transformers.models.whisper.feature_extraction_whisper",
+    ):
+        logger = logging.getLogger(logger_name)
+        if not any(isinstance(existing, _DropKnownWhisperNoise) for existing in logger.filters):
+            logger.addFilter(filt)
+
+    try:
+        from transformers.utils import logging as transformers_logging
+        transformers_logging.set_verbosity_error()
+    except Exception:
+        pass
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,6 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    _suppress_known_whisper_noise()
     cfg = WonderBotConfig.load(args.config)
     if args.backend is not None:
         cfg.backend.kind = args.backend
@@ -435,31 +495,104 @@ def _sensor_prompt_from_lines(observation_lines: list[str]) -> str:
     )
 
 
-def _sensor_observation_is_backend_worthy(source: str, body: str, salience: float) -> bool:
-    """Decide whether a sensor observation deserves a Qwen backend call.
+def _sensor_extract_transcript(body: str) -> str | None:
+    match = re.search(r'microphone catches speech:\s*"([^"]*)"', body, flags=re.IGNORECASE)
+    if not match:
+        return None
+    transcript = match.group(1).strip()
+    return transcript or None
 
-    The watch loop should print all salient sensor diagnostics, but only spend
-    backend tokens on observations likely to be meaningful. In particular,
-    low-salience camera motion and VAD-rejected sound-only microphone events are
-    useful diagnostics but noisy backend prompts.
-    """
+
+def _normalize_transcript(text: str) -> str:
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9%]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _transcript_similarity(left: str, right: str) -> float:
+    left_norm = _normalize_transcript(left)
+    right_norm = _normalize_transcript(right)
+    if not left_norm or not right_norm:
+        return 0.0
+    if left_norm == right_norm:
+        return 1.0
+    if left_norm in right_norm or right_norm in left_norm:
+        shorter = min(len(left_norm), len(right_norm))
+        longer = max(len(left_norm), len(right_norm))
+        if longer and shorter / longer >= 0.55:
+            return 0.95
+    return SequenceMatcher(None, left_norm, right_norm).ratio()
+
+
+def _sensor_observation_backend_reject_reason(source: str, body: str, salience: float) -> str | None:
+    """Return a short reason if an observation should not trigger Qwen."""
     source_lower = source.lower()
     body_lower = body.lower()
-
-    if "transcript accepted" in body_lower or "microphone catches speech:" in body_lower:
-        return True
 
     if (
         "stt: sound only" in body_lower
         or "vad rejected" in body_lower
         or "transcriber disabled" in body_lower
     ):
-        return False
+        return "sound-only/VAD rejected"
+
+    transcript = _sensor_extract_transcript(body)
+    if transcript is not None:
+        words = _normalize_transcript(transcript).split()
+
+        if "transcript accepted (silence)" in body_lower:
+            return "accepted-silence transcript"
+
+        if len(words) < 4:
+            return "short transcript"
+
+        if salience < 0.30:
+            return "low-salience transcript"
+
+        return None
+
+    if "transcript accepted" in body_lower or "microphone catches speech:" in body_lower:
+        return None
 
     if "camera" in source_lower or body_lower.startswith("camera "):
-        return salience >= 0.30
+        if salience < 0.30:
+            return "low-salience camera motion"
+        return None
 
-    return salience >= 0.75
+    if salience < 0.75:
+        return "low-salience sensor event"
+
+    return None
+
+
+def _sensor_observation_is_backend_worthy(source: str, body: str, salience: float) -> bool:
+    return _sensor_observation_backend_reject_reason(source, body, salience) is None
+
+
+def _sense_watch_transcript_is_repeat(
+    transcript: str,
+    recent_transcripts: list[tuple[str, float]],
+    now: float,
+    ttl_seconds: float = 24.0,
+    similarity_threshold: float = 0.82,
+) -> tuple[bool, list[tuple[str, float]]]:
+    transcript_norm = _normalize_transcript(transcript)
+    if not transcript_norm:
+        return True, recent_transcripts
+
+    fresh_recent = [
+        (old_norm, old_at)
+        for old_norm, old_at in recent_transcripts
+        if now - old_at <= ttl_seconds
+    ]
+
+    for old_norm, _old_at in fresh_recent:
+        if _transcript_similarity(transcript_norm, old_norm) >= similarity_threshold:
+            return True, fresh_recent
+
+    fresh_recent.append((transcript_norm, now))
+    return False, fresh_recent[-12:]
 
 
 def _parse_sense_watch_args(arg: str) -> tuple[int | None, float, float] | None:
@@ -516,6 +649,7 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
     backend_calls = 0
     last_backend_at = 0.0
     last_signature = ""
+    recent_transcripts: list[tuple[str, float]] = []
 
     try:
         while cycles is None or polls < cycles:
@@ -528,6 +662,7 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
             else:
                 observation_lines = []
                 backend_lines = []
+                reject_reasons = []
 
                 for obs in observations:
                     source, body, salience = _sensor_observation_parts(obs)
@@ -535,13 +670,32 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
                     line = f"- [{source}] {body}"
                     observation_lines.append(line)
 
-                    if _sensor_observation_is_backend_worthy(source, body, salience):
-                        backend_lines.append(line)
+                    reject_reason = _sensor_observation_backend_reject_reason(source, body, salience)
+                    if reject_reason is not None:
+                        reject_reasons.append(reject_reason)
+                        continue
+
+                    transcript = _sensor_extract_transcript(body)
+                    if transcript is not None:
+                        is_repeat, recent_transcripts = _sense_watch_transcript_is_repeat(
+                            transcript,
+                            recent_transcripts,
+                            now,
+                        )
+                        if is_repeat:
+                            reject_reasons.append("repeat/overlapping transcript")
+                            continue
+
+                    backend_lines.append(line)
 
                 signature = "\n".join(backend_lines)
 
                 if not backend_lines:
-                    print("[sense-watch] no backend-worthy observation; skipped backend call.")
+                    if reject_reasons:
+                        reason_text = "; ".join(sorted(set(reject_reasons)))
+                        print(f"[sense-watch] skipped backend: {reason_text}.")
+                    else:
+                        print("[sense-watch] no backend-worthy observation; skipped backend call.")
                 elif signature == last_signature:
                     print("[sense-watch] duplicate backend-worthy observation; skipped backend call.")
                 elif now - last_backend_at < cooldown:
