@@ -152,7 +152,7 @@ vision_lite_motion_pixel_threshold = 18.0
 vision_lite_scene_change_threshold = 0.22
 vision_lite_backend_min_salience = 0.35
 vision_lite_sharpness_reference = 120.0
-vision_lite_face_hint_enabled = false
+vision_lite_face_hint_enabled = true
 vision_lite_face_hint_min_interval_seconds = 5.0
 vision_lite_state_change_cooldown_seconds = 3.0
 

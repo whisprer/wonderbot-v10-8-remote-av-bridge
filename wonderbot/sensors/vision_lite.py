@@ -10,6 +10,51 @@ def clamp01(value: float) -> float:
 
 
 @dataclass(slots=True)
+class FaceLiteRegion:
+    """Normalized description of one OpenCV face-like region.
+
+    This is intentionally phrased as face-like rather than identity/person truth.
+    Haar cascades are useful hints, not reliable semantic perception.
+    """
+
+    x: float
+    y: float
+    width: float
+    height: float
+    center_x: float
+    center_y: float
+    area_ratio: float
+
+    def as_metadata(self) -> dict[str, float]:
+        return {
+            "x": round(self.x, 6),
+            "y": round(self.y, 6),
+            "width": round(self.width, 6),
+            "height": round(self.height, 6),
+            "center_x": round(self.center_x, 6),
+            "center_y": round(self.center_y, 6),
+            "area_ratio": round(self.area_ratio, 6),
+        }
+
+
+@dataclass(slots=True)
+class FaceLiteDetection:
+    enabled: bool
+    available: bool
+    count: int
+    confidence: float
+    stable: bool
+    appeared: bool
+    lost: bool
+    status: str
+    area_ratio: float
+    center_x: float
+    center_y: float
+    regions: tuple[FaceLiteRegion, ...]
+    checked_now: bool
+
+
+@dataclass(slots=True)
 class VisionLiteMetrics:
     brightness: float
     brightness_delta: float
@@ -32,6 +77,16 @@ class VisionLiteMetrics:
     face_hint_enabled: bool
     face_hint_available: bool
     faceish_count: int
+    faceish_confidence: float
+    faceish_stable: bool
+    faceish_appeared: bool
+    faceish_lost: bool
+    faceish_status: str
+    faceish_area_ratio: float
+    faceish_center_x: float
+    faceish_center_y: float
+    faceish_regions: tuple[FaceLiteRegion, ...]
+    faceish_checked_now: bool
     remote_timestamp_ms: int = 0
 
 
@@ -40,8 +95,11 @@ class VisionLiteAnalyzer:
 
     This deliberately avoids captioning, object recognition, Torch, BLIP, and any
     heavyweight model. It only reports low-level visual signals: motion, light,
-    sharpness, texture, broad scene change, and optional OpenCV Haar face-ish
-    hints when enabled and available.
+    sharpness, texture, broad scene change, and optional OpenCV Haar Face-Lite
+    presence hints when enabled and available.
+
+    Face-Lite is intentionally conservative: it reports possible face-like
+    regions, not identity, person truth, or emotion.
     """
 
     def __init__(
@@ -83,6 +141,24 @@ class VisionLiteAnalyzer:
         self._last_state_change_at = 0.0
         self._last_face_check_at = 0.0
         self._last_faceish_count = 0
+        self._last_face_detection = FaceLiteDetection(
+            enabled=self.face_hint_enabled,
+            available=False,
+            count=0,
+            confidence=0.0,
+            stable=False,
+            appeared=False,
+            lost=False,
+            status="disabled" if not self.face_hint_enabled else "unavailable",
+            area_ratio=0.0,
+            center_x=0.0,
+            center_y=0.0,
+            regions=(),
+            checked_now=False,
+        )
+        self._last_face_present = False
+        self._last_face_center: tuple[float, float] | None = None
+        self._last_face_area_ratio = 0.0
         self._face_cascade = self._load_face_cascade()
 
     @property
@@ -133,8 +209,8 @@ class VisionLiteAnalyzer:
             )
         )
 
-        faceish_count = self._detect_faceish(gray)
-        face_salience = 0.30 if faceish_count > 0 else 0.0
+        face = self._detect_faceish(gray)
+        face_salience = self._face_salience(face)
 
         salience = clamp01(
             max(
@@ -152,15 +228,25 @@ class VisionLiteAnalyzer:
             texture=texture,
             motion_magnitude=motion_magnitude,
             scene_change_score=scene_change_score,
-            faceish_count=faceish_count,
+            faceish_count=face.count,
+            faceish_status=face.status,
+            faceish_center_x=face.center_x,
+            faceish_center_y=face.center_y,
         )
         visual_state_changed = self._state_changed(visual_state)
+
+        face_backend_event = bool(
+            self.face_hint_enabled
+            and face.available
+            and face.confidence >= 0.36
+            and (face.appeared or face.lost or (face.stable and visual_state_changed))
+        )
 
         backend_hint = bool(
             salience >= self.backend_min_salience
             or scene_change_score >= self.scene_change_threshold
             or (visual_state_changed and salience >= max(self.min_salience, self.backend_min_salience * 0.72))
-            or (faceish_count > 0 and visual_state_changed)
+            or face_backend_event
         )
 
         self._prev_gray = gray
@@ -189,12 +275,23 @@ class VisionLiteAnalyzer:
             visual_state_changed=visual_state_changed,
             face_hint_enabled=self.face_hint_enabled,
             face_hint_available=self.face_hint_available,
-            faceish_count=faceish_count,
+            faceish_count=face.count,
+            faceish_confidence=face.confidence,
+            faceish_stable=face.stable,
+            faceish_appeared=face.appeared,
+            faceish_lost=face.lost,
+            faceish_status=face.status,
+            faceish_area_ratio=face.area_ratio,
+            faceish_center_x=face.center_x,
+            faceish_center_y=face.center_y,
+            faceish_regions=face.regions,
+            faceish_checked_now=face.checked_now,
             remote_timestamp_ms=int(remote_timestamp_ms or 0),
         )
 
     def should_report(self, metrics: VisionLiteMetrics) -> bool:
-        return bool(metrics.salience >= self.min_salience or metrics.visual_state_changed)
+        face_event = bool(metrics.faceish_appeared or metrics.faceish_lost)
+        return bool(metrics.salience >= self.min_salience or metrics.visual_state_changed or face_event)
 
     def _to_gray(self, frame: Any) -> Any:
         if getattr(frame, "ndim", 0) == 2:
@@ -221,25 +318,209 @@ class VisionLiteAnalyzer:
         except Exception:
             return None
 
-    def _detect_faceish(self, gray: Any) -> int:
-        if not self.face_hint_enabled or self._face_cascade is None:
-            return 0
+    def _detect_faceish(self, gray: Any) -> FaceLiteDetection:
+        if not self.face_hint_enabled:
+            detection = FaceLiteDetection(
+                enabled=False,
+                available=False,
+                count=0,
+                confidence=0.0,
+                stable=False,
+                appeared=False,
+                lost=False,
+                status="disabled",
+                area_ratio=0.0,
+                center_x=0.0,
+                center_y=0.0,
+                regions=(),
+                checked_now=False,
+            )
+            self._last_face_detection = detection
+            return detection
+
+        if self._face_cascade is None:
+            detection = FaceLiteDetection(
+                enabled=True,
+                available=False,
+                count=0,
+                confidence=0.0,
+                stable=False,
+                appeared=False,
+                lost=False,
+                status="unavailable",
+                area_ratio=0.0,
+                center_x=0.0,
+                center_y=0.0,
+                regions=(),
+                checked_now=False,
+            )
+            self._last_face_detection = detection
+            return detection
+
         now = time.monotonic()
         if (now - self._last_face_check_at) < self.face_hint_min_interval_seconds:
-            return int(self._last_faceish_count)
+            cached = self._last_face_detection
+            return FaceLiteDetection(
+                enabled=cached.enabled,
+                available=cached.available,
+                count=cached.count,
+                confidence=cached.confidence,
+                stable=cached.stable,
+                appeared=False,
+                lost=False,
+                status=cached.status,
+                area_ratio=cached.area_ratio,
+                center_x=cached.center_x,
+                center_y=cached.center_y,
+                regions=cached.regions,
+                checked_now=False,
+            )
+
         self._last_face_check_at = now
+        regions = self._run_face_cascade(gray)
+        count = len(regions)
+        present = count > 0
+        previous_present = bool(self._last_face_present)
+        appeared = bool(present and not previous_present)
+        lost = bool((not present) and previous_present)
+
+        primary = regions[0] if regions else None
+        center_x = float(primary.center_x) if primary else 0.0
+        center_y = float(primary.center_y) if primary else 0.0
+        area_ratio = float(primary.area_ratio) if primary else 0.0
+        stable = False
+
+        if present and previous_present and self._last_face_center is not None:
+            dx = center_x - self._last_face_center[0]
+            dy = center_y - self._last_face_center[1]
+            center_distance = float((dx * dx + dy * dy) ** 0.5)
+            area_delta = abs(area_ratio - self._last_face_area_ratio)
+            stable = bool(center_distance <= 0.12 and area_delta <= 0.10)
+
+        confidence = self._face_confidence(count=count, area_ratio=area_ratio, stable=stable, appeared=appeared)
+        status = self._face_status(
+            present=present,
+            confidence=confidence,
+            stable=stable,
+            appeared=appeared,
+            lost=lost,
+        )
+
+        if present:
+            self._last_face_center = (center_x, center_y)
+            self._last_face_area_ratio = area_ratio
+        else:
+            self._last_face_center = None
+            self._last_face_area_ratio = 0.0
+
+        self._last_face_present = present
+        self._last_faceish_count = count
+
+        detection = FaceLiteDetection(
+            enabled=True,
+            available=True,
+            count=count,
+            confidence=confidence,
+            stable=stable,
+            appeared=appeared,
+            lost=lost,
+            status=status,
+            area_ratio=area_ratio,
+            center_x=center_x,
+            center_y=center_y,
+            regions=tuple(regions),
+            checked_now=True,
+        )
+        self._last_face_detection = detection
+        return detection
+
+    def _run_face_cascade(self, gray: Any) -> list[FaceLiteRegion]:
+        if self._face_cascade is None:
+            return []
         try:
+            equalized = self.cv2.equalizeHist(gray)
             found = self._face_cascade.detectMultiScale(
-                gray,
-                scaleFactor=1.1,
+                equalized,
+                scaleFactor=1.08,
                 minNeighbors=5,
                 minSize=(32, 32),
+                flags=getattr(self.cv2, "CASCADE_SCALE_IMAGE", 0),
             )
-            count = int(len(found))
         except Exception:
-            count = 0
-        self._last_faceish_count = count
-        return count
+            return []
+
+        height, width = gray.shape[:2]
+        frame_area = max(1.0, float(width * height))
+        regions: list[FaceLiteRegion] = []
+
+        for raw in found[:8]:
+            x, y, w, h = [float(v) for v in raw]
+            if w <= 0.0 or h <= 0.0:
+                continue
+            area_ratio = clamp01((w * h) / frame_area)
+            # Filter tiny and implausibly huge rectangles. These are hints, not truth.
+            if area_ratio < 0.008 or area_ratio > 0.72:
+                continue
+            cx = clamp01((x + (w / 2.0)) / max(1.0, float(width)))
+            cy = clamp01((y + (h / 2.0)) / max(1.0, float(height)))
+            regions.append(
+                FaceLiteRegion(
+                    x=clamp01(x / max(1.0, float(width))),
+                    y=clamp01(y / max(1.0, float(height))),
+                    width=clamp01(w / max(1.0, float(width))),
+                    height=clamp01(h / max(1.0, float(height))),
+                    center_x=cx,
+                    center_y=cy,
+                    area_ratio=area_ratio,
+                )
+            )
+
+        regions.sort(key=lambda region: region.area_ratio, reverse=True)
+        return regions[:4]
+
+    def _face_confidence(self, *, count: int, area_ratio: float, stable: bool, appeared: bool) -> float:
+        if count <= 0:
+            return 0.0
+        confidence = 0.34
+        confidence += min(0.28, area_ratio * 2.2)
+        confidence += min(0.14, max(0, count - 1) * 0.05)
+        if stable:
+            confidence += 0.12
+        if appeared:
+            confidence += 0.04
+        return clamp01(min(0.86, confidence))
+
+    def _face_status(
+        self,
+        *,
+        present: bool,
+        confidence: float,
+        stable: bool,
+        appeared: bool,
+        lost: bool,
+    ) -> str:
+        if lost:
+            return "lost"
+        if not present:
+            return "none"
+        if appeared:
+            return "appeared"
+        if stable:
+            return "stable"
+        if confidence >= 0.62:
+            return "present"
+        return "possible"
+
+    def _face_salience(self, face: FaceLiteDetection) -> float:
+        if not face.enabled or not face.available:
+            return 0.0
+        if face.appeared or face.lost:
+            return clamp01(max(0.36, face.confidence * 0.70))
+        if face.stable and face.count > 0:
+            return clamp01(max(0.20, face.confidence * 0.34))
+        if face.count > 0:
+            return clamp01(max(0.26, face.confidence * 0.42))
+        return 0.0
 
     def _visual_state_signature(
         self,
@@ -250,7 +531,24 @@ class VisionLiteAnalyzer:
         motion_magnitude: float,
         scene_change_score: float,
         faceish_count: int,
+        faceish_status: str,
+        faceish_center_x: float,
+        faceish_center_y: float,
     ) -> str:
+        face_part = "no-faceish"
+        if faceish_count > 0:
+            face_part = ":".join(
+                [
+                    "faceish",
+                    str(min(3, int(faceish_count))),
+                    _bucket(faceish_center_x, (0.33, 0.66)),
+                    _bucket(faceish_center_y, (0.33, 0.66)),
+                    str(faceish_status),
+                ]
+            )
+        elif faceish_status == "lost":
+            face_part = "faceish-lost"
+
         return ":".join(
             [
                 _bucket(brightness, (0.22, 0.42, 0.64, 0.80)),
@@ -258,7 +556,7 @@ class VisionLiteAnalyzer:
                 _bucket(texture, (0.18, 0.36, 0.58, 0.78)),
                 _bucket(motion_magnitude, (0.05, 0.14, 0.28, 0.50)),
                 _bucket(scene_change_score, (0.08, 0.18, 0.32, 0.55)),
-                "faceish" if faceish_count > 0 else "no-faceish",
+                face_part,
             ]
         )
 
@@ -278,6 +576,7 @@ class VisionLiteAnalyzer:
 
 
 def metrics_metadata(metrics: VisionLiteMetrics, *, remote_bridge: bool = False) -> dict[str, object]:
+    regions = [region.as_metadata() for region in metrics.faceish_regions]
     data: dict[str, object] = {
         "vision_lite": True,
         "brightness": round(metrics.brightness, 6),
@@ -301,6 +600,19 @@ def metrics_metadata(metrics: VisionLiteMetrics, *, remote_bridge: bool = False)
         "face_hint_enabled": bool(metrics.face_hint_enabled),
         "face_hint_available": bool(metrics.face_hint_available),
         "faceish_count": int(metrics.faceish_count),
+        "face_lite": bool(metrics.face_hint_enabled),
+        "face_lite_is_inferred": True,
+        "face_lite_status": metrics.faceish_status,
+        "face_lite_count": int(metrics.faceish_count),
+        "face_lite_confidence": round(metrics.faceish_confidence, 6),
+        "face_lite_stable": bool(metrics.faceish_stable),
+        "face_lite_appeared": bool(metrics.faceish_appeared),
+        "face_lite_lost": bool(metrics.faceish_lost),
+        "face_lite_area_ratio": round(metrics.faceish_area_ratio, 6),
+        "face_lite_center_x": round(metrics.faceish_center_x, 6),
+        "face_lite_center_y": round(metrics.faceish_center_y, 6),
+        "face_lite_regions": regions,
+        "face_lite_checked_now": bool(metrics.faceish_checked_now),
         "memory_eligible": bool(metrics.backend_hint),
     }
     if remote_bridge:
@@ -318,15 +630,58 @@ def format_vision_lite_text(metrics: VisionLiteMetrics) -> str:
         f"{sharpness_phrase(metrics.sharpness)} focus",
         f"{texture_phrase(metrics.texture, metrics.edge_density)} texture",
     ]
+    face = face_lite_phrase(metrics)
+    if face:
+        parts.append(face)
     text = "; ".join(part for part in parts if part).strip()
     if metrics.visual_state_changed:
         text += "; visual state changed"
-    if metrics.face_hint_enabled:
-        if metrics.face_hint_available and metrics.faceish_count > 0:
-            text += f"; OpenCV face-ish hint: {metrics.faceish_count} face-like region(s)"
-        elif not metrics.face_hint_available:
-            text += "; OpenCV face-ish hint unavailable"
     return text + "."
+
+
+def face_lite_phrase(metrics: VisionLiteMetrics) -> str:
+    if not metrics.face_hint_enabled:
+        return ""
+    if not metrics.face_hint_available:
+        return "Face-Lite unavailable"
+    if metrics.faceish_lost:
+        return "Face-Lite: previously seen face-like region no longer detected"
+    if metrics.faceish_count <= 0:
+        return ""
+
+    count = int(metrics.faceish_count)
+    region_word = "region" if count == 1 else "regions"
+    confidence = metrics.faceish_confidence
+    if metrics.faceish_appeared:
+        prefix = "new possible"
+    elif metrics.faceish_stable:
+        prefix = "stable possible"
+    elif confidence >= 0.62:
+        prefix = "possible"
+    else:
+        prefix = "faint possible"
+
+    location = _face_location_phrase(metrics.faceish_center_x, metrics.faceish_center_y)
+    confidence_text = f"confidence={confidence:.2f}"
+    return f"Face-Lite: {prefix} face-like {region_word} detected ({count}, {location}, {confidence_text})"
+
+
+def _face_location_phrase(center_x: float, center_y: float) -> str:
+    horizontal = "center"
+    if center_x < 0.38:
+        horizontal = "left"
+    elif center_x > 0.62:
+        horizontal = "right"
+
+    vertical = "middle"
+    if center_y < 0.38:
+        vertical = "upper"
+    elif center_y > 0.62:
+        vertical = "lower"
+
+    if horizontal == "center" and vertical == "middle":
+        return "near center"
+    return f"{vertical}-{horizontal} frame"
 
 
 def brightness_phrase(value: float) -> str:
