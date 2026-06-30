@@ -1284,7 +1284,7 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
     latest_visual_affect_context = None
     last_spoken_text = ""
     last_spoken_at = 0.0
-    speaker_mute_seconds = 7.0
+    speaker_mute_seconds = 3.5
 
     try:
         while cycles is None or polls < cycles:
