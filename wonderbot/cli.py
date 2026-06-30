@@ -774,19 +774,32 @@ def _sensor_observation_parts(obs) -> tuple[str, str, float, dict[str, object]]:
 
 
 def _sensor_prompt_from_lines(observation_lines: list[str]) -> str:
-    return (
-        "Summarize these live remote sensor observations in one short sentence. "
-        "Use only the observations below. "
-        "Do not invent temperature, weather, location, object identity, or environmental readings. "
-        "If audio contains a transcript, mention the transcript briefly. "
-        "If audio says transcriber disabled or sound-only, say audio was detected but not transcribed. "
-        "For camera Vision-Lite observations, describe only motion, lighting, sharpness, texture, and scene-change signals. "
-        "If an observation includes an Affect estimate, treat it as tentative inferred metadata rather than fact. "
-        "If an observation includes a Multimodal affect estimate, treat it as cautious fused metadata, not emotional truth. "
-        "Do not identify objects, people, mood, location, or activity unless the observation explicitly says so.\n\n"
-        + "\n".join(observation_lines)
-    )
+    joined = "\n".join(observation_lines)
+    has_speech = "microphone catches speech:" in joined.lower()
 
+    if has_speech:
+        return (
+            "You are WonderBot in a live conversation with the human in front of you. "
+            "Use the microphone transcript as what the human just said. "
+            "Reply directly to the human in first person, like a present conversational partner. "
+            "Do not say 'the microphone detected', 'the camera detects', 'the transcript says', or 'sensor observation'. "
+            "Do not narrate telemetry. Do not quote the transcript unless quoting is genuinely useful. "
+            "Use camera context only if it helps the reply naturally. "
+            "Keep the reply to one short sentence, maximum 24 words. "
+            "If the transcript is unclear, say so briefly and ask for a repeat.\n\n"
+            "Live observations:\n"
+            + joined
+        )
+
+    return (
+        "You are WonderBot noticing the world in real time. "
+        "Make one brief natural comment about the visual change, not a sensor report. "
+        "Do not say 'camera detects', 'sensor', 'telemetry', 'salience', 'texture', or 'scene change'. "
+        "Do not invent objects, people, identity, mood, location, or activity. "
+        "Maximum 14 words.\n\n"
+        "Live observations:\n"
+        + joined
+    )
 
 def _sensor_extract_transcript(body: str) -> str | None:
     match = re.search(r'microphone catches speech:\s*"([^"]*)"', body, flags=re.IGNORECASE)
@@ -941,6 +954,38 @@ def _parse_sense_watch_args(arg: str) -> tuple[int | None, float, float] | None:
     return cycles, interval, cooldown
 
 
+def _sense_watch_transcript_is_self_echo(
+    transcript: str,
+    last_spoken_text: str,
+    now: float,
+    last_spoken_at: float,
+    ttl_seconds: float = 18.0,
+    similarity_threshold: float = 0.46,
+) -> bool:
+    """Return True when STT appears to be hearing WonderBot's own recent TTS."""
+    if not transcript or not last_spoken_text:
+        return False
+    if now - last_spoken_at > ttl_seconds:
+        return False
+
+    transcript_norm = _normalize_transcript(transcript)
+    spoken_norm = _normalize_transcript(last_spoken_text)
+    if not transcript_norm or not spoken_norm:
+        return False
+
+    if transcript_norm in spoken_norm or spoken_norm in transcript_norm:
+        return True
+
+    transcript_words = set(transcript_norm.split())
+    spoken_words = set(spoken_norm.split())
+    if len(transcript_words) >= 4 and len(spoken_words) >= 4:
+        overlap = len(transcript_words & spoken_words) / max(1, len(transcript_words))
+        if overlap >= 0.62:
+            return True
+
+    return _transcript_similarity(transcript_norm, spoken_norm) >= similarity_threshold
+
+
 def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
     try:
         parsed = _parse_sense_watch_args(arg)
@@ -974,6 +1019,8 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
     last_signature = ""
     recent_transcripts: list[tuple[str, float]] = []
     latest_visual_affect_context = None
+    last_spoken_text = ""
+    last_spoken_at = 0.0
 
     try:
         while cycles is None or polls < cycles:
@@ -1036,6 +1083,21 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
                             })
                             continue
 
+                        if _sense_watch_transcript_is_self_echo(
+                            transcript,
+                            last_spoken_text,
+                            now,
+                            last_spoken_at,
+                        ):
+                            reject_reasons.append("assistant self-echo")
+                            _append_live_lite_journal({
+                                "kind": "backend_skip",
+                                "poll": polls,
+                                "reason": "assistant self-echo",
+                                "lines": [line],
+                            })
+                            continue
+
                     backend_lines.append(line)
 
                 signature = "\n".join(backend_lines)
@@ -1082,6 +1144,13 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
                     answer = getattr(result, "text", None) or getattr(result, "content", None) or str(result)
                     answer_text = answer.strip()
                     print(f"[hf-sensor] {answer_text}")
+                    if getattr(bot, "voice_enabled", False):
+                        try:
+                            bot.speaker.say(answer_text)
+                            last_spoken_text = answer_text
+                            last_spoken_at = time.time()
+                        except Exception as exc:
+                            print(f"[voice] sensor speech failed: {exc}")
                     backend_calls += 1
                     last_backend_at = time.time()
                     last_signature = signature
