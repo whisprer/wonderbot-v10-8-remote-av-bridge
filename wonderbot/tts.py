@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Callable, Optional, Protocol
 from urllib import error as urlerror
 from urllib import request as urlrequest
@@ -425,6 +426,8 @@ def _resolve_playback_backend(fmt: str, backend: str) -> str:
     choice = (backend or 'auto').strip().lower()
     candidates = [choice] if choice != 'auto' else ['winsound', 'sounddevice', 'afplay', 'aplay', 'pw-play']
     for candidate in candidates:
+        if candidate in {'bridge', 'remote-bridge'}:
+            return 'bridge'
         if candidate == 'winsound' and sys.platform.startswith('win') and fmt == 'wav':
             return 'winsound'
         if candidate == 'sounddevice':
@@ -442,7 +445,41 @@ def _resolve_playback_backend(fmt: str, backend: str) -> str:
 
 
 
+def _upload_audio_file_to_bridge(path: Path, fmt: str) -> str:
+    base_url = (
+        os.getenv('WONDERBOT_TTS_BRIDGE_URL')
+        or os.getenv('WONDERBOT_BRIDGE_URL')
+        or 'http://127.0.0.1:8765'
+    ).rstrip('/')
+    token = os.getenv('WONDERBOT_TTS_BRIDGE_TOKEN') or os.getenv('WONDERBOT_BRIDGE_TOKEN') or ''
+    headers = {'X-Bridge-Token': token} if token else {}
+    try:
+        import httpx
+    except ImportError as exc:
+        raise TTSUnavailableError('httpx is required for bridge TTS playback. Install with: pip install httpx') from exc
+
+    media_type = 'audio/wav' if fmt == 'wav' else f'audio/{fmt}'
+    with path.open('rb') as handle:
+        files = {'audio': (path.name, handle, media_type)}
+        data = {
+            'timestamp_ms': str(int(time.time() * 1000)),
+            'fmt': fmt,
+            'source': 'wonderbot-tts',
+        }
+        response = httpx.post(
+            f'{base_url}/api/tts/push',
+            files=files,
+            data=data,
+            headers=headers,
+            timeout=15.0,
+        )
+    response.raise_for_status()
+    return 'bridge'
+
+
 def _play_audio_file(path: Path, fmt: str, backend: str) -> str:
+    if backend in {'bridge', 'remote-bridge'}:
+        return _upload_audio_file_to_bridge(path, fmt)
     if backend == 'winsound':
         import winsound
 
@@ -466,7 +503,7 @@ def _play_audio_file(path: Path, fmt: str, backend: str) -> str:
 def _try_build_pyttsx3(config: TTSConfig) -> Speaker | None:
     try:
         return Pyttsx3Speaker(config)
-    except TTSUnavailableError:
+    except Exception:
         return None
 
 

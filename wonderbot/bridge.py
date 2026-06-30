@@ -110,10 +110,47 @@ class AudioState:
         return float(self._frames) / float(max(1, self.sample_rate))
 
 
+class TTSOutbox:
+    def __init__(self, max_items: int = 8) -> None:
+        self.max_items = int(max_items)
+        self._items: deque = deque()
+        self._next_id = 1
+        self.latest_timestamp_ms = 0
+        self.latest_source = ''
+
+    def push(self, payload: bytes, *, media_type: str, fmt: str, timestamp_ms: int, source: str) -> dict:
+        if not payload:
+            raise ValueError('empty TTS audio payload')
+        item = {
+            'id': self._next_id,
+            'payload': bytes(payload),
+            'media_type': media_type or 'audio/wav',
+            'fmt': fmt or 'wav',
+            'timestamp_ms': int(timestamp_ms or int(time.time() * 1000)),
+            'source': source or 'wonderbot-tts',
+        }
+        self._next_id += 1
+        self._items.append(item)
+        while len(self._items) > self.max_items:
+            self._items.popleft()
+        self.latest_timestamp_ms = int(item['timestamp_ms'])
+        self.latest_source = str(item['source'])
+        return item
+
+    def pop(self) -> dict | None:
+        if not self._items:
+            return None
+        return self._items.popleft()
+
+    def queued(self) -> int:
+        return len(self._items)
+
+
 class BridgeStore:
     def __init__(self) -> None:
         self.frame = FrameState()
         self.audio = AudioState()
+        self.tts = TTSOutbox()
         self.lock = threading.Lock()
 
 
@@ -149,6 +186,11 @@ def create_app(token: str = ''):
                     'channels': STORE.audio.channels,
                     'buffered_seconds': round(STORE.audio.buffered_seconds(), 3),
                     'source': STORE.audio.source,
+                },
+                'tts': {
+                    'queued': STORE.tts.queued(),
+                    'latest_timestamp_ms': STORE.tts.latest_timestamp_ms,
+                    'source': STORE.tts.latest_source,
                 },
             }
 
@@ -221,6 +263,40 @@ def create_app(token: str = ''):
             'X-Source': source,
         })
 
+    @app.post('/api/tts/push')
+    async def push_tts_audio(
+        audio: UploadFile = File(...),
+        timestamp_ms: int = Form(0),
+        fmt: str = Form('wav'),
+        source: str = Form('wonderbot-tts'),
+        x_bridge_token: str | None = Header(default=None),
+    ):
+        _require_token(token, x_bridge_token)
+        payload = await audio.read()
+        with STORE.lock:
+            item = STORE.tts.push(
+                payload,
+                media_type=audio.content_type or 'audio/wav',
+                fmt=fmt or 'wav',
+                timestamp_ms=int(timestamp_ms or int(time.time() * 1000)),
+                source=source or 'wonderbot-tts',
+            )
+        return JSONResponse({'ok': True, 'id': item['id'], 'queued': STORE.tts.queued()})
+
+    @app.get('/api/tts/next.wav')
+    async def next_tts_audio(x_bridge_token: str | None = Header(default=None)):
+        _require_token(token, x_bridge_token)
+        with STORE.lock:
+            item = STORE.tts.pop()
+        if item is None:
+            return Response(status_code=204)
+        return Response(content=item['payload'], media_type=item['media_type'], headers={
+            'X-Timestamp-Ms': str(item['timestamp_ms']),
+            'X-Source': str(item['source']),
+            'X-TTS-Id': str(item['id']),
+            'X-TTS-Format': str(item['fmt']),
+        })
+
     return app
 
 
@@ -242,6 +318,8 @@ class DesktopBridgeClient:
         audio_meter: bool = False,
         audio_meter_seconds: float = 5.0,
         warn_silence_dbfs: float = -70.0,
+        tts_playback: bool = False,
+        tts_poll_seconds: float = 0.25,
     ) -> None:
         import cv2  # type: ignore
         import httpx
@@ -266,6 +344,8 @@ class DesktopBridgeClient:
         self.audio_meter = bool(audio_meter)
         self.audio_meter_seconds = max(0.5, float(audio_meter_seconds))
         self.warn_silence_dbfs = float(warn_silence_dbfs)
+        self.tts_playback = bool(tts_playback)
+        self.tts_poll_seconds = max(0.10, float(tts_poll_seconds))
         self._last_audio_meter_at = 0.0
         self.audio_chunk_seconds = max(0.25, float(audio_chunk_seconds))
         self.source_name = source_name
@@ -376,6 +456,31 @@ class DesktopBridgeClient:
             except Exception:
                 pass
 
+    def _play_tts_payload(self, payload: bytes) -> None:
+        try:
+            data, sample_rate = self._sf.read(io.BytesIO(payload), dtype='float32', always_2d=False)
+            self._sd.play(data, int(sample_rate))
+            self._sd.wait()
+        except Exception as exc:
+            print(f'[bridge-client] TTS playback failed: {exc}')
+
+    def _tts_playback_loop(self) -> None:
+        print('[bridge-client] remote TTS playback enabled')
+        while not self._stop.is_set():
+            try:
+                response = self._client.get(f'{self.server_url}/api/tts/next.wav', headers=self._headers())
+                if response.status_code == 200 and response.content:
+                    tts_id = response.headers.get('X-TTS-Id', '?')
+                    print(f'[bridge-client] playing remote TTS id={tts_id}')
+                    self._play_tts_payload(response.content)
+                elif response.status_code not in {204, 404}:
+                    print(f'[bridge-client] TTS poll returned HTTP {response.status_code}')
+                    time.sleep(1.0)
+                else:
+                    time.sleep(self.tts_poll_seconds)
+            except Exception:
+                time.sleep(1.0)
+
     def _maybe_print_audio_meter(self, chunk) -> None:
         now = time.time()
         if now - self._last_audio_meter_at < self.audio_meter_seconds:
@@ -400,6 +505,8 @@ class DesktopBridgeClient:
             threading.Thread(target=self._camera_loop, daemon=True),
             threading.Thread(target=self._audio_loop, daemon=True),
         ]
+        if self.tts_playback:
+            threads.append(threading.Thread(target=self._tts_playback_loop, daemon=True))
         for t in threads:
             t.start()
         print(f'[bridge-client] streaming to {self.server_url} as {self.source_name}')
@@ -441,6 +548,8 @@ def _client_main() -> int:
     parser.add_argument('--audio-meter', action='store_true', help='print periodic microphone RMS/peak levels')
     parser.add_argument('--audio-meter-seconds', type=float, default=5.0)
     parser.add_argument('--warn-silence-dbfs', type=float, default=-70.0)
+    parser.add_argument('--tts-playback', action='store_true', help='poll the bridge server for generated TTS WAVs and play them on this desktop')
+    parser.add_argument('--tts-poll-seconds', type=float, default=0.25)
     args = parser.parse_args()
     DesktopBridgeClient(
         server_url=args.server_url,
@@ -458,6 +567,8 @@ def _client_main() -> int:
         audio_meter=args.audio_meter,
         audio_meter_seconds=args.audio_meter_seconds,
         warn_silence_dbfs=args.warn_silence_dbfs,
+        tts_playback=args.tts_playback,
+        tts_poll_seconds=args.tts_poll_seconds,
     ).run()
     return 0
 
