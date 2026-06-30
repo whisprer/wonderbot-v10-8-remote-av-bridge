@@ -780,13 +780,15 @@ def _sensor_prompt_from_lines(observation_lines: list[str]) -> str:
     if has_speech:
         return (
             "You are WonderBot in a live conversation with the human in front of you. "
-            "Use the microphone transcript as what the human just said. "
+            "Treat the microphone transcript as what the human just said to you. "
             "Reply directly to the human in first person, like a present conversational partner. "
-            "Do not say 'the microphone detected', 'the camera detects', 'the transcript says', or 'sensor observation'. "
-            "Do not narrate telemetry. Do not quote the transcript unless quoting is genuinely useful. "
+            "Do not narrate telemetry. Do not say 'the microphone detected', 'the camera detects', "
+            "'the transcript says', 'sensor observation', or 'live observations'. "
+            "Never say generic assistant phrases such as 'How can I assist you today?' unless the human explicitly asks for help. "
+            "Do not quote the transcript unless quoting is genuinely useful. "
             "Use camera context only if it helps the reply naturally. "
-            "Keep the reply to one short sentence, maximum 24 words. "
-            "If the transcript is unclear, say so briefly and ask for a repeat.\n\n"
+            "Keep the reply to one short sentence, maximum 18 words. "
+            "If the transcript is unclear, say that briefly and ask for a repeat.\n\n"
             "Live observations:\n"
             + joined
         )
@@ -796,7 +798,7 @@ def _sensor_prompt_from_lines(observation_lines: list[str]) -> str:
         "Make one brief natural comment about the visual change, not a sensor report. "
         "Do not say 'camera detects', 'sensor', 'telemetry', 'salience', 'texture', or 'scene change'. "
         "Do not invent objects, people, identity, mood, location, or activity. "
-        "Maximum 14 words.\n\n"
+        "Maximum 12 words.\n\n"
         "Live observations:\n"
         + joined
     )
@@ -831,6 +833,220 @@ def _transcript_similarity(left: str, right: str) -> float:
     return SequenceMatcher(None, left_norm, right_norm).ratio()
 
 
+def _sensor_short_transcript_is_conversational(transcript: str) -> bool:
+    """Return True for short transcripts that are likely meaningful user turns.
+
+    This deliberately allows compact conversational phrases such as "yes",
+    "no", "thank you", "that's funny", "they are adorable", and
+    "what do you think?" while continuing to reject telemetry fragments,
+    filler, and common self-echo/reporting debris.
+    """
+    raw = transcript.strip()
+    norm = _normalize_transcript(raw)
+    if not norm:
+        return False
+
+    words = norm.split()
+    if len(words) > 6:
+        return True
+
+    exact_rejects = {
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "but",
+        "uh",
+        "um",
+        "erm",
+        "hmm",
+        "mm",
+        "camera",
+        "the camera",
+        "microphone",
+        "the microphone",
+        "transcript",
+        "the transcript",
+        "sensor",
+        "the sensor",
+        "detected speech",
+        "speech detected",
+        "audio detected",
+        "strong motion",
+        "scene change",
+        "lighting shift",
+    }
+    if norm in exact_rejects:
+        return False
+
+    reject_phrases = {
+        "microphone detected",
+        "microphone catches",
+        "camera detects",
+        "camera sees",
+        "detected speech",
+        "the transcript",
+        "with the transcript",
+        "sensor observation",
+        "hf sensor",
+        "salience",
+        "frontend vad",
+        "voice like banding",
+        "mid lit scene",
+        "sharp focus",
+        "moderate texture",
+        "busy texture",
+        "dense texture",
+        "visual state changed",
+    }
+    if any(phrase in norm for phrase in reject_phrases):
+        return False
+
+    accept_exact = {
+        "yes",
+        "yeah",
+        "yep",
+        "yup",
+        "no",
+        "nope",
+        "nah",
+        "ok",
+        "okay",
+        "sure",
+        "please",
+        "thanks",
+        "thank you",
+        "sorry",
+        "hello",
+        "hi",
+        "hey",
+        "stop",
+        "wait",
+        "listen",
+        "look",
+        "repeat that",
+        "say that again",
+        "come here",
+        "talk to me",
+    }
+    if norm in accept_exact:
+        return True
+
+    if raw.endswith("?"):
+        return True
+
+    question_starts = {
+        "what",
+        "why",
+        "who",
+        "where",
+        "when",
+        "how",
+        "can",
+        "could",
+        "would",
+        "will",
+        "do",
+        "does",
+        "did",
+        "are",
+        "is",
+        "am",
+        "should",
+    }
+    if words and words[0] in question_starts:
+        return True
+
+    conversational_words = {
+        "i",
+        "im",
+        "ive",
+        "id",
+        "you",
+        "youre",
+        "youve",
+        "we",
+        "were",
+        "thats",
+        "that",
+        "this",
+        "they",
+        "them",
+        "he",
+        "she",
+        "it",
+        "think",
+        "feel",
+        "mean",
+        "meant",
+        "want",
+        "need",
+        "know",
+        "hear",
+        "heard",
+        "see",
+        "look",
+        "talk",
+        "speak",
+        "answer",
+        "repeat",
+        "help",
+    }
+    emotion_or_value_words = {
+        "adorable",
+        "cute",
+        "funny",
+        "amused",
+        "weird",
+        "strange",
+        "cool",
+        "good",
+        "bad",
+        "great",
+        "brilliant",
+        "amazing",
+        "lovely",
+        "nice",
+        "wrong",
+        "right",
+        "better",
+        "worse",
+        "scary",
+        "sad",
+        "happy",
+        "angry",
+        "uncertain",
+        "confused",
+        "interesting",
+    }
+
+    word_set = set(words)
+    if word_set & emotion_or_value_words:
+        return True
+
+    if len(words) >= 2 and word_set & conversational_words:
+        return True
+
+    imperative_starts = {
+        "look",
+        "listen",
+        "wait",
+        "stop",
+        "come",
+        "say",
+        "tell",
+        "answer",
+        "repeat",
+        "watch",
+        "notice",
+    }
+    if words and words[0] in imperative_starts:
+        return True
+
+    return False
+
+
 def _sensor_observation_backend_reject_reason(
     source: str,
     body: str,
@@ -857,6 +1073,10 @@ def _sensor_observation_backend_reject_reason(
             return "accepted-silence transcript"
 
         if len(words) < 4:
+            if _sensor_short_transcript_is_conversational(transcript):
+                if salience < 0.18:
+                    return "low-salience short conversational transcript"
+                return None
             return "short transcript"
 
         if salience < 0.30:
@@ -959,10 +1179,15 @@ def _sense_watch_transcript_is_self_echo(
     last_spoken_text: str,
     now: float,
     last_spoken_at: float,
-    ttl_seconds: float = 18.0,
-    similarity_threshold: float = 0.46,
+    ttl_seconds: float = 42.0,
+    similarity_threshold: float = 0.38,
 ) -> bool:
-    """Return True when STT appears to be hearing WonderBot's own recent TTS."""
+    """Return True when STT appears to be hearing WonderBot's own recent TTS.
+
+    Remote speaker playback means the Surface microphone can re-hear WonderBot.
+    This matcher is intentionally forgiving: it catches exact echoes, partial
+    fragments, and short phrase tails like "you today" from a longer spoken reply.
+    """
     if not transcript or not last_spoken_text:
         return False
     if now - last_spoken_at > ttl_seconds:
@@ -976,12 +1201,50 @@ def _sense_watch_transcript_is_self_echo(
     if transcript_norm in spoken_norm or spoken_norm in transcript_norm:
         return True
 
-    transcript_words = set(transcript_norm.split())
-    spoken_words = set(spoken_norm.split())
-    if len(transcript_words) >= 4 and len(spoken_words) >= 4:
-        overlap = len(transcript_words & spoken_words) / max(1, len(transcript_words))
-        if overlap >= 0.62:
+    transcript_words_all = transcript_norm.split()
+    spoken_words_all = spoken_norm.split()
+    filler = {
+        "a", "an", "the", "and", "or", "but", "to", "of", "in", "on",
+        "for", "with", "that", "this", "it", "is", "are", "am", "be",
+    }
+    transcript_words = [w for w in transcript_words_all if w not in filler]
+    spoken_words = [w for w in spoken_words_all if w not in filler]
+
+    if transcript_words and spoken_words:
+        spoken_set = set(spoken_words)
+        transcript_set = set(transcript_words)
+        overlap = len(transcript_set & spoken_set) / max(1, len(transcript_set))
+
+        if len(transcript_words) <= 3 and len(transcript_set & spoken_set) >= 2:
             return True
+
+        if overlap >= 0.50:
+            return True
+
+    # Consecutive bigram/trigram tail fragments are very common in speaker echo.
+    spoken_joined = " ".join(spoken_words_all)
+    for width in (3, 2):
+        if len(transcript_words_all) >= width:
+            for i in range(0, len(transcript_words_all) - width + 1):
+                gram = " ".join(transcript_words_all[i:i + width])
+                if gram and gram in spoken_joined:
+                    return True
+
+    assistant_stock_echoes = {
+        "how can i assist you today",
+        "can i assist you today",
+        "assist you today",
+        "youre welcome",
+        "you are welcome",
+        "could you repeat",
+        "not sure i heard",
+        "i heard that correctly",
+        "i see you were just",
+        "no worries",
+        "glad were having a conversation",
+    }
+    if any(phrase in transcript_norm and phrase in spoken_norm for phrase in assistant_stock_echoes):
+        return True
 
     return _transcript_similarity(transcript_norm, spoken_norm) >= similarity_threshold
 
@@ -1021,6 +1284,7 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
     latest_visual_affect_context = None
     last_spoken_text = ""
     last_spoken_at = 0.0
+    speaker_mute_seconds = 7.0
 
     try:
         while cycles is None or polls < cycles:
@@ -1046,8 +1310,30 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
 
                 for obs in observations:
                     source, body, salience, metadata = _sensor_observation_parts(obs)
-                    print(f"[{source}] {body} (salience={salience:.2f})")
                     line = f"- [{source}] {body}"
+
+                    # Half-duplex-lite: after WonderBot speaks through the Surface,
+                    # the Surface microphone often hears the speaker playback.
+                    # Suppress microphone observations briefly so he does not
+                    # transcribe or display his own words as user speech.
+                    if (
+                        source == "microphone"
+                        and last_spoken_at > 0.0
+                        and now - last_spoken_at < speaker_mute_seconds
+                    ):
+                        remaining = speaker_mute_seconds - (now - last_spoken_at)
+                        print(f"[sense-watch] skipped mic during speaker playback ({remaining:.1f}s remaining).")
+                        _append_live_lite_journal({
+                            "kind": "backend_skip",
+                            "poll": polls,
+                            "reason": "speaker playback mute",
+                            "mute_remaining": remaining,
+                            "lines": [line],
+                        })
+                        reject_reasons.append("speaker playback mute")
+                        continue
+
+                    print(f"[{source}] {body} (salience={salience:.2f})")
                     observation_lines.append(line)
 
                     reject_reason = _sensor_observation_backend_reject_reason(source, body, salience, metadata)
@@ -1068,21 +1354,6 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
 
                     transcript = _sensor_extract_transcript(body)
                     if transcript is not None:
-                        is_repeat, recent_transcripts = _sense_watch_transcript_is_repeat(
-                            transcript,
-                            recent_transcripts,
-                            now,
-                        )
-                        if is_repeat:
-                            reject_reasons.append("repeat/overlapping transcript")
-                            _append_live_lite_journal({
-                                "kind": "backend_skip",
-                                "poll": polls,
-                                "reason": "repeat/overlapping transcript",
-                                "lines": [line],
-                            })
-                            continue
-
                         if _sense_watch_transcript_is_self_echo(
                             transcript,
                             last_spoken_text,
@@ -1094,6 +1365,21 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
                                 "kind": "backend_skip",
                                 "poll": polls,
                                 "reason": "assistant self-echo",
+                                "lines": [line],
+                            })
+                            continue
+
+                        is_repeat, recent_transcripts = _sense_watch_transcript_is_repeat(
+                            transcript,
+                            recent_transcripts,
+                            now,
+                        )
+                        if is_repeat:
+                            reject_reasons.append("repeat/overlapping transcript")
+                            _append_live_lite_journal({
+                                "kind": "backend_skip",
+                                "poll": polls,
+                                "reason": "repeat/overlapping transcript",
                                 "lines": [line],
                             })
                             continue
@@ -1144,13 +1430,16 @@ def _handle_sense_watch(arg: str, bot: WonderBot) -> bool:
                     answer = getattr(result, "text", None) or getattr(result, "content", None) or str(result)
                     answer_text = answer.strip()
                     print(f"[hf-sensor] {answer_text}")
+                    last_spoken_text = answer_text
                     if getattr(bot, "voice_enabled", False):
                         try:
                             bot.speaker.say(answer_text)
-                            last_spoken_text = answer_text
-                            last_spoken_at = time.time()
                         except Exception as exc:
                             print(f"[voice] sensor speech failed: {exc}")
+                        finally:
+                            last_spoken_at = time.time()
+                    else:
+                        last_spoken_at = time.time()
                     backend_calls += 1
                     last_backend_at = time.time()
                     last_signature = signature

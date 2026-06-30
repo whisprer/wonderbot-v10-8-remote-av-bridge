@@ -219,6 +219,7 @@ hf_speaker_embeddings_source = "Matthijs/cmu-arctic-xvectors"
 hf_speaker_id = 7306
 hf_device = "cpu"
 hf_sample_rate = 16000
+playback_backend = "bridge"
 openai_model = "gpt-4o-mini-tts"
 openai_voice = "sage"
 openai_response_format = "wav"
